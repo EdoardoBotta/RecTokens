@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Iterable
 
 import torch
 
@@ -67,19 +66,15 @@ class Quantizer(ABC):
         """
         ...
 
-    def fit(self, batches: Iterable[torch.Tensor]) -> Quantizer:
-        """Fit the quantizer to unlabelled training data.
+    def fit_step(self, batch: torch.Tensor) -> Quantizer:
+        """Update the quantizer with a single batch of training data.
 
         The default implementation is a no-op (suitable for learned
         quantizers trained end-to-end).  Override in clustering-based
         subclasses.
 
-        ``batches`` is an iterable of float tensors each of shape ``(B, D)``.
-        This allows streaming / out-of-core fitting: callers may pass a lazy
-        generator so that only one batch lives in memory at a time.
-
         Args:
-            batches: Iterable of float tensors of shape ``(B, D)``.
+            batch: Float tensor of shape ``(B, D)``.
 
         Returns:
             ``self``, for method chaining.

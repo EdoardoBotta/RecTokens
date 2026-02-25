@@ -4,7 +4,6 @@ from pathlib import Path
 
 import torch
 
-from rectokens.core.dataset import ItemDataset
 from rectokens.core.tokenizer import TokenSequence, Tokenizer
 from rectokens.quantizers.kmeans import KMeansQuantizer
 from rectokens.quantizers.residual import ResidualQuantizer
@@ -25,7 +24,9 @@ class RQKMeansTokenizer(Tokenizer):
 
         data = np.random.randn(10_000, 128).astype("float32")
         tok = RQKMeansTokenizer(num_levels=3, codebook_size=256, dim=128)
-        tok.fit(NumpyDataset(data))
+        dataset = NumpyDataset(data)
+        for batch in dataset.iter_batches(batch_size=256):
+            tok.fit_step(batch)
 
         features = torch.randn(8, 128)
         tokens = tok.encode(features)   # TokenSequence  codes: (8, 3)
@@ -35,11 +36,6 @@ class RQKMeansTokenizer(Tokenizer):
         num_levels: Number of residual quantization levels ``L``.
         codebook_size: Codebook size at each level ``K``.
         dim: Item feature dimensionality ``D``.
-        init_size: Number of samples buffered for K-means++ seeding at each
-                   level.  Defaults to ``10 * codebook_size`` per level.
-                   Increase for better initialisation quality on large datasets.
-        fit_batch_size: Batch size used when streaming the dataset during
-                        fitting.  Does not affect encode/decode.
         seed: Base random seed; level ``i`` uses ``seed + i``.
     """
 
@@ -49,20 +45,16 @@ class RQKMeansTokenizer(Tokenizer):
         codebook_size: int = 256,
         dim: int = 64,
         *,
-        init_size: int = 0,
-        fit_batch_size: int = 4096,
         seed: int = 42,
     ) -> None:
         self.num_levels = num_levels
         self.codebook_size = codebook_size
         self.dim = dim
-        self._fit_batch_size = fit_batch_size
 
         quantizers = [
             KMeansQuantizer(
                 codebook_size=codebook_size,
                 dim=dim,
-                init_size=init_size,
                 seed=seed + i,
             )
             for i in range(num_levels)
@@ -74,21 +66,16 @@ class RQKMeansTokenizer(Tokenizer):
     # Tokenizer interface
     # ------------------------------------------------------------------
 
-    def fit(self, dataset: ItemDataset) -> RQKMeansTokenizer:
-        """Fit all K-means codebooks by streaming through ``dataset``.
-
-        The dataset is iterated ``num_levels`` times (once per residual level)
-        and only ``fit_batch_size`` items are held in memory per batch, so
-        datasets of arbitrary size are supported.
+    def fit_step(self, batch: torch.Tensor) -> RQKMeansTokenizer:
+        """Update all K-means codebooks with a single batch.
 
         Args:
-            dataset: Any object satisfying the :class:`~rectokens.core.dataset.ItemDataset`
-                     protocol.
+            batch: Float tensor of shape ``(B, D)``.
 
         Returns:
             ``self``.
         """
-        self._rq.fit(dataset, batch_size=self._fit_batch_size)
+        self._rq.fit_step(batch)
         self._fitted = True
         return self
 
@@ -103,10 +90,10 @@ class RQKMeansTokenizer(Tokenizer):
             shape ``(B, num_levels)`` or ``(num_levels,)``.
 
         Raises:
-            RuntimeError: If called before :meth:`fit`.
+            RuntimeError: If called before :meth:`fit_step`.
         """
         if not self._fitted:
-            raise RuntimeError("RQKMeansTokenizer must be fit before encoding.")
+            raise RuntimeError("RQKMeansTokenizer must be fit_step'd before encoding.")
         single = features.ndim == 1
         if single:
             features = features.unsqueeze(0)

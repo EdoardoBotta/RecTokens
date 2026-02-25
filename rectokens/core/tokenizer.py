@@ -2,12 +2,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import torch
-
-if TYPE_CHECKING:
-    from .dataset import ItemDataset
 
 
 @dataclass
@@ -80,12 +76,11 @@ class Tokenizer(ABC):
     """
 
     @abstractmethod
-    def fit(self, dataset: ItemDataset) -> Tokenizer:
-        """Fit the tokenizer on a dataset of item features.
+    def fit_step(self, batch: torch.Tensor) -> Tokenizer:
+        """Update the tokenizer with a single batch of item features.
 
         Args:
-            dataset: Any object satisfying the :class:`~rectokens.core.dataset.ItemDataset`
-                     protocol.
+            batch: Float tensor of shape ``(B, D)``.
 
         Returns:
             ``self``, for method chaining.

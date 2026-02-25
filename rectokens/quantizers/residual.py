@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-from typing import Generator, TYPE_CHECKING
-
 import torch
 import torch.nn as nn
 
 from rectokens.core.quantizer import Quantizer, ResidualQuantizerOutput
-
-if TYPE_CHECKING:
-    from rectokens.core.dataset import ItemDataset
 
 
 class ResidualQuantizer(nn.Module):
@@ -62,44 +57,24 @@ class ResidualQuantizer(nn.Module):
     # Fit
     # ------------------------------------------------------------------
 
-    def fit(self, dataset: ItemDataset, batch_size: int = 256) -> ResidualQuantizer:
-        """Fit each level sequentially on the residual of all previous levels.
+    def fit_step(self, batch: torch.Tensor) -> ResidualQuantizer:
+        """Update each level with a single batch, propagating residuals.
 
-        The dataset is iterated **once per level**.  At each level ``l``, a
-        lazy generator applies the already-fitted quantizers ``0..l-1`` to
-        every batch from the dataset and yields the resulting residuals.
-        Only one batch is held in memory at a time, so the dataset never
-        needs to fit in memory.
+        Level 0 receives the raw batch.  Each subsequent level receives the
+        residual left by all previous levels.
 
         Args:
-            dataset: Any object satisfying the
-                     :class:`~rectokens.core.dataset.ItemDataset` protocol.
-            batch_size: Number of items per batch passed to each quantizer.
+            batch: Float tensor of shape ``(B, D)``.
 
         Returns:
             ``self``.
         """
-        for level_idx, quantizer in enumerate(self._levels):
-            quantizer.fit(self._residual_batches(dataset, batch_size, level_idx))
-        return self
-
-    def _residual_batches(
-        self,
-        dataset: ItemDataset,
-        batch_size: int,
-        level_idx: int,
-    ) -> Generator[torch.Tensor, None, None]:
-        """Yield residual batches for fitting level ``level_idx``.
-
-        Each batch is produced by taking raw item features from ``dataset``
-        and computing the residual after applying levels ``0..level_idx-1``.
-        """
         with torch.no_grad():
-            for batch in dataset.iter_batches(batch_size):
-                residual = batch.float()
-                for q in self._levels[:level_idx]:
-                    residual = q.quantize(residual).residuals
-                yield residual
+            residual = batch.float()
+            for quantizer in self._levels:
+                quantizer.fit_step(residual)
+                residual = quantizer.quantize(residual).residuals
+        return self
 
     # ------------------------------------------------------------------
     # Quantize

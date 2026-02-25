@@ -91,6 +91,9 @@ class EuclideanCodebook(Codebook):
             ``(B,)`` and ``distances`` ``(B,)``.
         """
         # query: (B, D),  embeddings: (K, D)
+        # Cast to the codebook dtype — MPS requires both operands of matmul
+        # to share the same dtype as the accumulator.
+        query = query.to(self.embeddings.dtype)
         q_sq = (query ** 2).sum(dim=1, keepdim=True)    # (B, 1)
         e_sq = (self.embeddings ** 2).sum(dim=1)         # (K,)
         dots = query @ self.embeddings.t()               # (B, K)

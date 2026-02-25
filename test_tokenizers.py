@@ -9,8 +9,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from rectokens import NumpyDataset, TensorDataset
-from rectokens.tokenizers import RQKMeansTokenizer, RQVAETokenizer
+from rectokens.datasets import NumpyDataset, TensorDataset
+from rectokens.tokenizers.rq_kmeans import RQKMeansTokenizer
+from rectokens.tokenizers.rqvae import RQVAETokenizer
 
 # ---------------------------------------------------------------------------
 # Config
@@ -77,8 +78,9 @@ def test_rqkmeans() -> bool:
     )
 
     # 1. Fit
-    tok.fit(dataset)
-    results.append(check("fit() sets _fitted = True", tok._fitted))
+    for batch in dataset.iter_batches(batch_size=64):
+        tok.fit_step(batch)
+    results.append(check("fit_step() sets _fitted = True", tok._fitted))
 
     # 2. Batch encode
     features = torch.from_numpy(data_np[:8])
@@ -147,10 +149,11 @@ def test_rqkmeans() -> bool:
     # 9. TensorDataset variant
     data_t, td = make_tensor_dataset()
     tok2 = RQKMeansTokenizer(num_levels=NUM_LEVELS, codebook_size=CODEBOOK_SIZE, dim=DIM)
-    tok2.fit(td)
+    for batch in td.iter_batches(batch_size=64):
+        tok2.fit_step(batch)
     tok2_tokens = tok2.encode(data_t[:4])
     results.append(check(
-        "TensorDataset fit+encode works",
+        "TensorDataset fit_step+encode works",
         tok2_tokens.codes.shape == (4, NUM_LEVELS),
     ))
 
@@ -166,13 +169,13 @@ def test_rqkmeans() -> bool:
             bool((loaded_tokens.codes == tokens.codes).all()),
         ))
 
-    # 11. Encode before fit raises
+    # 11. Encode before fit_step raises
     tok_unfitted = RQKMeansTokenizer(num_levels=NUM_LEVELS, codebook_size=CODEBOOK_SIZE, dim=DIM)
     try:
         tok_unfitted.encode(features)
-        results.append(check("encode before fit raises RuntimeError", False))
+        results.append(check("encode before fit_step raises RuntimeError", False))
     except RuntimeError:
-        results.append(check("encode before fit raises RuntimeError", True))
+        results.append(check("encode before fit_step raises RuntimeError", True))
 
     return all(results)
 
@@ -288,14 +291,13 @@ def test_rqvae() -> bool:
         str(single_recon.shape),
     ))
 
-    # 7. fit() stub raises NotImplementedError
-    from rectokens import NumpyDataset
-    dummy_ds = NumpyDataset(np.zeros((4, DIM), dtype=np.float32))
+    # 7. fit_step() stub raises NotImplementedError
+    dummy_batch = torch.zeros(4, DIM)
     try:
-        tok.fit(dummy_ds)
-        results.append(check("fit() stub raises NotImplementedError", False))
+        tok.fit_step(dummy_batch)
+        results.append(check("fit_step() stub raises NotImplementedError", False))
     except NotImplementedError:
-        results.append(check("fit() stub raises NotImplementedError", True))
+        results.append(check("fit_step() stub raises NotImplementedError", True))
 
     # 8. Save / load round-trip
     import tempfile, os

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Iterable
-
 import torch
 
 from rectokens.codebooks.euclidean import EuclideanCodebook
@@ -50,12 +48,11 @@ class KMeansQuantizer(Quantizer):
         codebook_size: int,
         dim: int,
         *,
-        init_size: int = 0,
         seed: int = 42,
     ) -> None:
         self._codebook = EuclideanCodebook(codebook_size, dim)
-        self._init_size = init_size if init_size > 0 else 10 * codebook_size
         self._seed = seed
+        self._counts: torch.Tensor | None = None
         self._fitted = False
 
     # ------------------------------------------------------------------
@@ -66,62 +63,38 @@ class KMeansQuantizer(Quantizer):
     def codebook(self) -> Codebook:
         return self._codebook
 
-    def fit(self, batches: Iterable[torch.Tensor]) -> KMeansQuantizer:
-        """Fit centroids via streaming mini-batch K-means.
+    def fit_step(self, batch: torch.Tensor) -> KMeansQuantizer:
+        """Update centroids with one batch of data.
 
-        Only ``init_size`` samples are held in memory at once for the
-        K-means++ initialisation step; all remaining data is processed a
-        batch at a time.
+        On the first call the codebook is seeded with K-means++ on ``batch``.
+        Every subsequent call performs a mini-batch running-average update.
 
         Args:
-            batches: Iterable of float tensors of shape ``(B, D)``.  May be
-                     a lazy generator — it is consumed exactly once.
+            batch: Float tensor of shape ``(B, D)``.
 
         Returns:
             ``self``.
         """
+        batch = batch.float()
         k = self._codebook.size
-        batch_iter = iter(batches)
+        device = batch.device
 
-        # ------------------------------------------------------------------
-        # Step 1: buffer init_size samples for K-means++ seeding
-        # ------------------------------------------------------------------
-        init_data, leftover, batch_iter = self._collect_init(batch_iter, self._init_size)
+        if self._counts is None:
+            # First call: K-means++ initialisation on this batch
+            n = len(batch)
+            if n == 0:
+                raise ValueError("fit_step() received an empty batch.")
+            actual_k = min(k, n)
+            generator = torch.Generator(device=device).manual_seed(self._seed)
+            centroids = self._kmeans_plus_plus_init(batch, actual_k, generator)
+            if actual_k < k:
+                extra_idx = torch.randint(n, (k - actual_k,), generator=generator, device=device)
+                centroids = torch.cat([centroids, batch[extra_idx]])
+            self._codebook.update(torch.arange(k, device=device), centroids)
+            self._counts = torch.zeros(k, dtype=torch.long, device=device)
 
-        if len(init_data) == 0:
-            raise ValueError("fit() received no data.")
-
-        device = init_data.device
-        generator = torch.Generator(device=device).manual_seed(self._seed)
-
-        # ------------------------------------------------------------------
-        # Step 2: K-means++ initialisation on the buffered samples
-        # ------------------------------------------------------------------
-        n_init = len(init_data)
-        actual_k = min(k, n_init)  # can't have more centroids than data points
-        centroids = self._kmeans_plus_plus_init(init_data, actual_k, generator)
-
-        # Pad to k if we had fewer data points than codebook entries
-        if actual_k < k:
-            extra_idx = torch.randint(n_init, (k - actual_k,), generator=generator, device=device)
-            centroids = torch.cat([centroids, init_data[extra_idx]])
-
-        # ------------------------------------------------------------------
-        # Step 3: mini-batch updates — running-average centroid estimates
-        # ------------------------------------------------------------------
-        counts = torch.zeros(k, dtype=torch.long, device=device)
-
-        # Process the buffered init data first (so it is counted in the update)
-        centroids, counts = _minibatch_update(init_data, centroids, counts)
-
-        # Process the partial batch that was split off during buffering
-        if leftover is not None and len(leftover) > 0:
-            centroids, counts = _minibatch_update(leftover, centroids, counts)
-
-        # Process the remainder of the stream
-        for batch in batch_iter:
-            centroids, counts = _minibatch_update(batch.float(), centroids, counts)
-
+        centroids = self._codebook.embeddings.detach().clone()
+        centroids, self._counts = _minibatch_update(batch, centroids, self._counts)
         self._codebook.update(torch.arange(k, device=device), centroids)
         self._fitted = True
         return self
@@ -157,41 +130,6 @@ class KMeansQuantizer(Quantizer):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _collect_init(
-        batch_iter: Iterable[torch.Tensor],
-        init_size: int,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, Iterable[torch.Tensor]]:
-        """Buffer up to ``init_size`` samples from the front of the stream.
-
-        Returns:
-            ``(init_data, leftover, remaining_iter)`` where ``leftover`` is the
-            portion of the last consumed batch that was not needed for init, and
-            ``remaining_iter`` is the iterator to continue from.
-        """
-        buffer: list[torch.Tensor] = []
-        collected = 0
-        leftover: torch.Tensor | None = None
-
-        for batch in batch_iter:
-            batch = batch.float()
-            need = init_size - collected
-            if len(batch) <= need:
-                buffer.append(batch)
-                collected += len(batch)
-            else:
-                buffer.append(batch[:need])
-                leftover = batch[need:]
-                collected = init_size
-                break
-            if collected >= init_size:
-                break
-
-        if not buffer:
-            return torch.empty(0), None, iter([])
-
-        return torch.cat(buffer), leftover, batch_iter
-
-    @staticmethod
     def _kmeans_plus_plus_init(
         data: torch.Tensor,
         k: int,
@@ -205,8 +143,12 @@ class KMeansQuantizer(Quantizer):
         for _ in range(k - 1):
             stacked = torch.stack(centroids)                          # (c, D)
             dists = torch.cdist(data, stacked).min(dim=1).values ** 2  # (N,)
-            probs = dists / dists.sum()
-            idx = int(torch.multinomial(probs, 1, generator=generator).item())
+            total = dists.sum()
+            if total == 0:
+                # All points coincide with existing centroids; pick uniformly
+                idx = int(torch.randint(n, (1,), generator=generator, device=data.device).item())
+            else:
+                idx = int(torch.multinomial(dists / total, 1, generator=generator).item())
             centroids.append(data[idx])
 
         return torch.stack(centroids)
