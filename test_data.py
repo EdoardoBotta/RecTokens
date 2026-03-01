@@ -8,7 +8,7 @@ from torch.utils.data import BatchSampler
 from torch.utils.data import DataLoader
 from torch.utils.data import RandomSampler
 from torch.optim import AdamW
-from examples.data.amazon import ItemData
+from examples.amazon import ItemData
 
 from rectokens.tokenizers.rqvae import RQVAETokenizer
 
@@ -70,7 +70,7 @@ def train_rqvae(
         hidden_dim=hidden_dim,
         num_levels=num_levels,
         codebook_size=codebook_size,
-        learnable_codebook=False,
+        learnable_codebook=True,
     ).to(device)
 
     # AdamW only sees encoder + decoder weights — codebook embeddings are
@@ -92,7 +92,7 @@ def train_rqvae(
             optimizer.zero_grad()
 
             out = model(x)
-            recon_loss = F.mse_loss(out["recon"], x)
+            recon_loss = F.mse_loss(out["recon"], x, reduction="none").sum(dim=-1).mean()
             commit_loss = out["commitment_loss"]
             (recon_loss + commit_loss).backward()
             optimizer.step()
@@ -123,7 +123,7 @@ if __name__ == "__main__":
 
     model = train_rqvae(
         dataset,
-        latent_dim=64,
+        latent_dim=32,
         hidden_dim=512,
         num_levels=3,
         codebook_size=256,

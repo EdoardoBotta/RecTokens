@@ -117,9 +117,10 @@ class VQQuantizer(Quantizer, nn.Module):
             # gradients.  e_k is an nn.Parameter so F.mse_loss(x.detach(), e_k)
             # pushes the codebook entry toward the encoder output; the commitment
             # term pushes the encoder output toward the (detached) codebook entry.
+            #import pdb; pdb.set_trace()  # noqa: T100
             commitment_loss = (
-                F.mse_loss(x.detach(), e_k)
-                + self.commitment_weight * F.mse_loss(x, e_k.detach())
+                F.mse_loss(x.detach(), e_k, reduction="none").sum(dim=-1).mean()
+                + self.commitment_weight * F.mse_loss(x, e_k.detach(), reduction="none").sum(dim=-1).mean()
             )
         else:
             # EMA mode: codebook updated externally; only encoder commitment term.
