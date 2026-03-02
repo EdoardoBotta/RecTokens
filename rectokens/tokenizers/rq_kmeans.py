@@ -115,7 +115,7 @@ class RQKMeansTokenizer(Tokenizer):
         if single:
             codes = codes.unsqueeze(0)
 
-        recon = torch.zeros(len(codes), self.dim, dtype=torch.float32)
+        recon = torch.zeros(len(codes), self.dim, dtype=torch.float32, device=codes.device)
         for level_idx, quantizer in enumerate(self._rq.levels):
             level_codes = codes[:, level_idx]
             recon = recon + quantizer.codebook.lookup(level_codes)

@@ -1,5 +1,5 @@
-from rectokens.decoding.trie import Trie
 from collections import deque
+from rectokens.decoding.trie import Trie
 from torch import sparse_csr_tensor
 
 def csr_from_trie(trie: Trie):

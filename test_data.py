@@ -135,7 +135,7 @@ if __name__ == "__main__":
     # Sanity check
     model.eval()
     device = next(model.parameters()).device
-    tokens = model.encode(dataset.item_data[:4].to(device))
+    tokens = model.encode(dataset.item_data[:4].float().to(device))
     recon = model.decode(tokens)
     print(f"\nEncoded shape : {tokens.codes.shape}")
     print(f"Decoded shape : {recon.shape}")
