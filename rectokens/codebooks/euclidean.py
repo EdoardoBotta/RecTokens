@@ -5,6 +5,11 @@ import torch.nn as nn
 
 from rectokens.core.codebook import Codebook, SearchResult
 
+IS_GPU_AVAILABLE = torch.cuda.is_available()
+
+if IS_GPU_AVAILABLE:
+    from rectokens.kernels.nn_quantize import nearest_neighbor_quantize
+
 
 class EuclideanCodebook(Codebook):
     """A flat codebook that uses exhaustive L2 nearest-neighbor search.
@@ -94,13 +99,8 @@ class EuclideanCodebook(Codebook):
         # Cast to the codebook dtype — MPS requires both operands of matmul
         # to share the same dtype as the accumulator.
         query = query.to(self.embeddings.dtype)
-        q_sq = (query ** 2).sum(dim=1, keepdim=True)    # (B, 1)
-        e_sq = (self.embeddings ** 2).sum(dim=1)         # (K,)
-        dots = query @ self.embeddings.t()               # (B, K)
-        dist2 = q_sq + e_sq - 2.0 * dots                # (B, K)  [squared L2]
-        codes = dist2.argmin(dim=1)                      # (B,)
-        distances = dist2[torch.arange(len(codes), device=codes.device), codes]
-        return SearchResult(codes=codes, distances=distances)
+        codes = nearest_neighbor_quantize(query, self.embeddings) if IS_GPU_AVAILABLE else torch.cdist(query, self.embeddings).min(-1)[1]
+        return SearchResult(codes=codes)
 
     def update(self, codes: torch.Tensor, embeddings: torch.Tensor) -> None:
         """Overwrite specific entries in the codebook.
