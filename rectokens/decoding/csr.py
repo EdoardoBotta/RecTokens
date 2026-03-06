@@ -17,7 +17,6 @@ def csr_from_trie(trie: Trie, vocab_size: int, dense_lookup_layers: int = 2) -> 
     max_children_at_depth: dict[int, int] = {}
     dense_lookup_mask = torch.zeros([vocab_size] * dense_lookup_layers, dtype=torch.bool)
 
-    # BFS — frontier carries (node, depth, path-from-root)
     frontier: deque[tuple] = deque([(trie.root, 0, ())])
     while frontier:
         node, depth, path = frontier.popleft()
@@ -30,13 +29,12 @@ def csr_from_trie(trie: Trie, vocab_size: int, dense_lookup_layers: int = 2) -> 
             col_idxs.append(token)
             child_path = path + (token,)
 
-            # Mark dense prefix once we've reached the required depth
             if len(child_path) == dense_lookup_layers:
                 dense_lookup_mask[child_path] = True
 
             frontier.append((child, depth + 1, child_path))
 
-    col_idxs.append(-1)  # sentinel
+    col_idxs.append(-1)
     values = list(range(1, len(col_idxs))) + [-1]
 
     layer_max_branches = [
