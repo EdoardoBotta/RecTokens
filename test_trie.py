@@ -262,6 +262,137 @@ def test_csr() -> None:
     print("\nAll CSR checks passed.")
 
 
+def test_csr_sorted_batch() -> None:
+    from rectokens.decoding.csr import csr_from_trie, csr_from_sorted_batch
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def lex_sort(rows: list[list[int]]) -> torch.Tensor:
+        return torch.tensor(sorted(rows), dtype=torch.long)
+
+    def children_of_batch(csr, bfs_row: int) -> dict[int, int]:
+        """Same semantics as children_of() but works with -1 leaf crow entries."""
+        crow = csr.crow_indices().tolist()
+        n_rows = len(crow) - 1
+        if bfs_row >= n_rows:
+            return {}
+        cols = csr.col_indices().tolist()
+        vals = csr.values().tolist()
+        start, end = crow[bfs_row], crow[bfs_row + 1]
+        # -1 crow entries mean an empty leaf row (range(-1,-1) is empty)
+        if start == end:
+            return {}
+        return {cols[j]: vals[j] for j in range(start, end)}
+
+    def assert_same_edges(csr_t, csr_b, label: str) -> None:
+        """cols and vals must match; crow may differ only for leaf rows."""
+        cols_t = csr_t.col_indices().tolist()
+        cols_b = csr_b.col_indices().tolist()
+        vals_t = csr_t.values().tolist()
+        vals_b = csr_b.values().tolist()
+        crow_t = csr_t.crow_indices().tolist()
+        crow_b = csr_b.crow_indices().tolist()
+        print(f"  trie crow : {crow_t}")
+        print(f"  batch crow: {crow_b}")
+        assert cols_t == cols_b, f"{label} cols mismatch\n  trie : {cols_t}\n  batch: {cols_b}"
+        assert vals_t == vals_b, f"{label} vals mismatch\n  trie : {vals_t}\n  batch: {vals_b}"
+        # crow must agree on all non-leaf rows (positive values in both)
+        for i, (ct, cb) in enumerate(zip(crow_t, crow_b)):
+            if ct >= 0 and cb >= 0:
+                assert ct == cb, f"{label} crow[{i}] mismatch: trie={ct} batch={cb}"
+
+    # ------------------------------------------------------------------
+    # 1. Single token [42]
+    # ------------------------------------------------------------------
+    print("\n--- sorted_batch vs trie: [42] ---")
+    t1 = Trie(); t1.insert([42])
+    b1, _ = csr_from_sorted_batch(lex_sort([[42]]))
+    assert_same_edges(csr_from_trie(t1), b1, "[42]")
+    assert children_of_batch(b1, 0) == {42: 1}
+    assert children_of_batch(b1, 1) == {}
+    print("  ✓")
+
+    # ------------------------------------------------------------------
+    # 2. Linear chain [1, 2, 3]
+    # ------------------------------------------------------------------
+    print("\n--- sorted_batch vs trie: [1,2,3] ---")
+    t2 = Trie(); t2.insert([1, 2, 3])
+    b2, _ = csr_from_sorted_batch(lex_sort([[1, 2, 3]]))
+    assert_same_edges(csr_from_trie(t2), b2, "[1,2,3]")
+    assert children_of_batch(b2, 0) == {1: 1}
+    assert children_of_batch(b2, 1) == {2: 2}
+    assert children_of_batch(b2, 2) == {3: 3}
+    assert children_of_batch(b2, 3) == {}
+    print("  ✓")
+
+    # ------------------------------------------------------------------
+    # 3. Branching [1,2,3] + [1,2,7]
+    # ------------------------------------------------------------------
+    print("\n--- sorted_batch vs trie: [1,2,3]+[1,2,7] ---")
+    t3 = Trie(); t3.insert([1, 2, 3]); t3.insert([1, 2, 7])
+    b3, _ = csr_from_sorted_batch(lex_sort([[1, 2, 3], [1, 2, 7]]))
+    assert_same_edges(csr_from_trie(t3), b3, "[1,2,3]+[1,2,7]")
+    assert children_of_batch(b3, 0) == {1: 1}
+    assert children_of_batch(b3, 1) == {2: 2}
+    assert children_of_batch(b3, 2) == {3: 3, 7: 4}
+    assert children_of_batch(b3, 3) == {}
+    assert children_of_batch(b3, 4) == {}
+    print("  ✓")
+
+    # ------------------------------------------------------------------
+    # 4. Multi-branch [1,2,1] + [3,1,2] + [3,1,3]
+    # ------------------------------------------------------------------
+    print("\n--- sorted_batch vs trie: [1,2,1]+[3,1,2]+[3,1,3] ---")
+    seqs4 = [[1, 2, 1], [3, 1, 2], [3, 1, 3]]
+    t4 = Trie()
+    for s in seqs4:
+        t4.insert(s)
+    b4, _ = csr_from_sorted_batch(lex_sort(seqs4))
+    assert_same_edges(csr_from_trie(t4), b4, "[1,2,1]+[3,1,2]+[3,1,3]")
+    assert children_of_batch(b4, 0) == {1: 1, 3: 2}
+    assert children_of_batch(b4, 1) == {2: 3}
+    assert children_of_batch(b4, 2) == {1: 4}
+    assert children_of_batch(b4, 3) == {1: 5}
+    assert children_of_batch(b4, 4) == {2: 6, 3: 7}
+    assert children_of_batch(b4, 5) == {}
+    assert children_of_batch(b4, 6) == {}
+    assert children_of_batch(b4, 7) == {}
+    for target in seqs4:
+        bfs_row = 0
+        for token in target:
+            ch = children_of_batch(b4, bfs_row)
+            assert token in ch, f"token {token} missing at bfs_row={bfs_row}: {ch}"
+            bfs_row = ch[token]
+        print(f"  walk {target} → terminal BFS row {bfs_row}  ✓")
+
+    # ------------------------------------------------------------------
+    # 5. Random batch — walks must agree between both methods
+    # ------------------------------------------------------------------
+    print("\n--- sorted_batch vs trie: random batch ---")
+    ids_raw = make_semantic_ids(12, 3, 8, seed=0)
+    ids_sorted = torch.tensor(sorted(ids_raw.tolist()), dtype=torch.long)
+    trie_rand = build_trie(ids_sorted)
+    csr_t = csr_from_trie(trie_rand)
+    csr_b, _ = csr_from_sorted_batch(ids_sorted)
+    assert_same_edges(csr_t, csr_b, "random batch")
+    for row in ids_sorted.tolist():
+        bfs_t, bfs_b = 0, 0
+        for token in row:
+            ch_t = children_of_batch(csr_t, bfs_t)
+            ch_b = children_of_batch(csr_b, bfs_b)
+            assert token in ch_t, f"trie: token {token} missing at {bfs_t}"
+            assert token in ch_b, f"batch: token {token} missing at {bfs_b}"
+            assert ch_t[token] == ch_b[token], \
+                f"next-state mismatch for token {token}: trie={ch_t[token]} batch={ch_b[token]}"
+            bfs_t = ch_t[token]
+            bfs_b = ch_b[token]
+    print("  All walks agree between trie and sorted_batch CSR  ✓")
+
+    print("\nAll csr_from_sorted_batch checks passed.")
+
+
 if __name__ == "__main__":
     main()
     test_csr()
+    test_csr_sorted_batch()
