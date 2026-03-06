@@ -465,7 +465,7 @@ class RQVAETokenizer(nn.Module, Tokenizer):
         if single:
             codes = codes.unsqueeze(0)
 
-        latent = torch.zeros(len(codes), self.latent_dim, dtype=torch.float32)
+        latent = torch.zeros(len(codes), self.latent_dim, dtype=torch.float32, device=codes.device)
         for level_idx, quantizer in enumerate(self.rq.levels):
             level_codes = codes[:, level_idx]
             latent = latent + quantizer.codebook.lookup(level_codes)
