@@ -276,6 +276,7 @@ def test_csr_sorted_batch() -> None:
         assert cols_t == cols_b, f"{label} cols mismatch\n  trie : {cols_t}\n  batch: {cols_b}"
         assert vals_t == vals_b, f"{label} vals mismatch\n  trie : {vals_t}\n  batch: {vals_b}"
         assert rows_t == rows_b, f"{label} row_ptrs mismatch\n  trie : {rows_t}\n  batch: {rows_b}"
+        assert (t.dense_states == b.dense_states).all(), f"{label} dense_states mismatch"
 
     # ------------------------------------------------------------------
     # 1. Single token [42]
@@ -287,6 +288,9 @@ def test_csr_sorted_batch() -> None:
     assert_same_edges(csr_from_trie(t1, vocab_size=50, dense_lookup_layers=1), b1, "[42]")
     assert children_of_batch(b1, 0) == {42: 1}
     assert children_of_batch(b1, 1) == {}
+    assert b1.dense_states.shape == (50,)
+    assert b1.dense_states[42] == children_of_batch(b1, 0)[42]  # == 1
+    assert b1.dense_states.sum() == 1
     print("  ✓")
 
     # ------------------------------------------------------------------
@@ -302,6 +306,9 @@ def test_csr_sorted_batch() -> None:
     assert children_of_batch(b2, 3) == {}
     # default dense_lookup_layers=2: mask shape (8,8), indexed by (tok0, tok1)
     assert b2.dense_lookup_mask.shape == (8, 8) and b2.dense_lookup_mask[1, 2] and b2.dense_lookup_mask.sum() == 1
+    assert b2.dense_states.shape == (8, 8)
+    # dense_states[1, 2] == BFS node ID reached after tokens (1, 2) == 2
+    assert b2.dense_states[1, 2] == children_of_batch(b2, children_of_batch(b2, 0)[1])[2]
     print("  ✓")
 
     # ------------------------------------------------------------------
@@ -318,6 +325,8 @@ def test_csr_sorted_batch() -> None:
     assert children_of_batch(b3, 4) == {}
     # Both sequences share prefix (1,2), so only one cell is set
     assert b3.dense_lookup_mask.shape == (8, 8) and b3.dense_lookup_mask[1, 2] and b3.dense_lookup_mask.sum() == 1
+    assert b3.dense_states.shape == (8, 8)
+    assert b3.dense_states[1, 2] == children_of_batch(b3, children_of_batch(b3, 0)[1])[2]
     print("  ✓")
 
     # ------------------------------------------------------------------
@@ -347,9 +356,47 @@ def test_csr_sorted_batch() -> None:
         print(f"  walk {target} → terminal BFS row {bfs_row}  ✓")
     # Prefixes: (1,2) and (3,1) are the unique 2-token starts
     assert b4.dense_lookup_mask.shape == (8, 8) and b4.dense_lookup_mask[1, 2] and b4.dense_lookup_mask[3, 1] and b4.dense_lookup_mask.sum() == 2
+    assert b4.dense_states.shape == (8, 8)
+    node_1 = children_of_batch(b4, 0)[1]
+    assert b4.dense_states[1, 2] == children_of_batch(b4, node_1)[2]
+    node_3 = children_of_batch(b4, 0)[3]
+    assert b4.dense_states[3, 1] == children_of_batch(b4, node_3)[1]
 
     # ------------------------------------------------------------------
-    # 5. Random batch — walks must agree between both methods
+    # 5. Token value 0 — verifies 0-indexed tokens are handled correctly
+    #    vocab_size=4, tokens in [0, 3]; sequences contain token 0
+    # ------------------------------------------------------------------
+    print("\n--- sorted_batch vs trie: sequences with token 0 ---")
+    seqs5 = [[0, 1, 2], [0, 3, 0], [2, 0, 1]]
+    t5 = Trie()
+    for s in seqs5:
+        t5.insert(s)
+    b5 = csr_from_sorted_batch(lex_sort(seqs5), vocab_size=4)
+    assert_same_edges(csr_from_trie(t5, vocab_size=4), b5, "zero-token seqs")
+    # token 0 must be a valid root child
+    assert 0 in children_of_batch(b5, 0), "token 0 missing from root children"
+    assert 2 in children_of_batch(b5, 0), "token 2 missing from root children"
+    # dense mask: prefixes (0,1), (0,3), (2,0) must be set; nothing else
+    assert b5.dense_lookup_mask.shape == (4, 4)
+    assert b5.dense_lookup_mask[0, 1] and b5.dense_lookup_mask[0, 3] and b5.dense_lookup_mask[2, 0]
+    assert b5.dense_lookup_mask.sum() == 3
+    assert b5.dense_states.shape == (4, 4)
+    node_0 = children_of_batch(b5, 0)[0]
+    assert b5.dense_states[0, 1] == children_of_batch(b5, node_0)[1]
+    assert b5.dense_states[0, 3] == children_of_batch(b5, node_0)[3]
+    node_2 = children_of_batch(b5, 0)[2]
+    assert b5.dense_states[2, 0] == children_of_batch(b5, node_2)[0]
+    # full walk for each sequence
+    for target in seqs5:
+        bfs_row = 0
+        for token in target:
+            ch = children_of_batch(b5, bfs_row)
+            assert token in ch, f"token {token} missing at bfs_row={bfs_row}: {ch}"
+            bfs_row = ch[token]
+        print(f"  walk {target} → terminal BFS row {bfs_row}  ✓")
+
+    # ------------------------------------------------------------------
+    # 6. Random batch — walks must agree between both methods
     # ------------------------------------------------------------------
     print("\n--- sorted_batch vs trie: random batch ---")
     ids_raw = make_semantic_ids(12, 3, 8, seed=0)
@@ -362,6 +409,8 @@ def test_csr_sorted_batch() -> None:
     assert csr_b.dense_lookup_mask.any()
     # Every (tok0, tok1) pair in the corpus must be set in the mask
     assert csr_b.dense_lookup_mask[ids_sorted[:, 0], ids_sorted[:, 1]].all()
+    # dense_states must be nonzero at every corpus prefix
+    assert (csr_b.dense_states[ids_sorted[:, 0], ids_sorted[:, 1]] > 0).all()
     assert_same_edges(csr_t, csr_b, "random batch")
     for row in ids_sorted.tolist():
         bfs_t, bfs_b = 0, 0
@@ -379,7 +428,91 @@ def test_csr_sorted_batch() -> None:
     print("\nAll csr_from_sorted_batch checks passed.")
 
 
+def test_vtnk() -> None:
+    from rectokens.decoding.csr import csr_from_sorted_batch
+    from rectokens.decoding.vntk import vtnk_pytorch
+
+    def lex_sort(rows: list[list[int]]) -> torch.Tensor:
+        return torch.tensor(sorted(rows), dtype=torch.long)
+
+    def uniform_logits(B: int, V: int) -> torch.Tensor:
+        return torch.zeros(B, V)
+
+    seqs = [[1, 2, 1], [3, 1, 2], [3, 1, 3]]
+    csr = csr_from_sorted_batch(lex_sort(seqs), vocab_size=8)
+    # row_ptrs = [0, 2, 3, 4, 5, 7, 7, 7]; nodes 0-6 safe, node 7 is last
+    # BFS:  root(0) → {1:1, 3:2}
+    #       node1(1) → {2:3}
+    #       node2(2) → {1:4}
+    #       node3(3) → {1:5}
+    #       node4(4) → {2:6, 3:7}
+
+    # ------------------------------------------------------------------
+    # 1. Batch size 1 — root at step 0
+    # ------------------------------------------------------------------
+    print("\n--- vtnk B=1: root at step 0 ---")
+    logits = uniform_logits(1, 8)
+    nn, cl = vtnk_pytorch(logits, torch.tensor([0]), csr, step=0, vocab_size=8)
+    assert nn.shape == (1, csr.layer_max_branches[0])
+    assert cl.shape == (1, 8)
+    assert sorted(nn[0][nn[0] >= 0].tolist()) == [1, 2]
+    assert cl[0, 1] == 0.0 and cl[0, 3] == 0.0       # valid tokens keep logit
+    assert cl[0, 0].item() == float('-inf')            # invalid tokens masked to -inf
+    assert (cl[0] > float('-inf')).sum() == 2          # exactly 2 valid tokens
+    print("  ✓")
+
+    # ------------------------------------------------------------------
+    # 2. Two beams at root (same node) — corrected logits must be identical
+    # ------------------------------------------------------------------
+    print("\n--- vtnk B=2: both at root ---")
+    logits = uniform_logits(2, 8)
+    nn, cl = vtnk_pytorch(logits, torch.tensor([0, 0]), csr, step=0, vocab_size=8)
+    assert nn.shape == (2, csr.layer_max_branches[0])
+    assert cl.shape == (2, 8)
+    assert (cl[0] == cl[1]).all()
+    assert cl[0, 1] == 0.0 and cl[0, 3] == 0.0
+    assert (cl[0] > float('-inf')).sum() == 2
+    print("  ✓")
+
+    # ------------------------------------------------------------------
+    # 3. Two beams at different step-1 nodes — per-beam corrected logits differ
+    #    node 1 → token 2 (child BFS 3); node 2 → token 1 (child BFS 4)
+    # ------------------------------------------------------------------
+    print("\n--- vtnk B=2: two different nodes at step 1 ---")
+    logits = uniform_logits(2, 8)
+    nn, cl = vtnk_pytorch(logits, torch.tensor([1, 2]), csr, step=1, vocab_size=8)
+    assert nn.shape == (2, csr.layer_max_branches[1])
+    assert cl.shape == (2, 8)
+    assert nn[0, 0] == 3 and nn[1, 0] == 4
+    assert cl[0, 2] == 0.0 and cl[0, 1].item() == float('-inf')
+    assert cl[1, 1] == 0.0 and cl[1, 2].item() == float('-inf')
+    assert (cl[0] > float('-inf')).sum() == 1
+    assert (cl[1] > float('-inf')).sum() == 1
+    print("  ✓")
+
+    # ------------------------------------------------------------------
+    # 4. Three beams at step 2: nodes 3, 3, 4
+    #    node 3 → token 1 (child BFS 5); node 4 → tokens 2,3 (children BFS 6,7)
+    # ------------------------------------------------------------------
+    print("\n--- vtnk B=3: mixed branching at step 2 ---")
+    logits = uniform_logits(3, 8)
+    nn, cl = vtnk_pytorch(logits, torch.tensor([3, 3, 4]), csr, step=2, vocab_size=8)
+    assert nn.shape == (3, csr.layer_max_branches[2])
+    assert cl.shape == (3, 8)
+    assert (nn[0] == nn[1]).all()
+    assert sorted(nn[2][nn[2] >= 0].tolist()) == [6, 7]
+    assert (cl[0] > float('-inf')).sum() == 1          # node 3: 1 valid token
+    assert (cl[1] > float('-inf')).sum() == 1
+    assert (cl[2] > float('-inf')).sum() == 2          # node 4: 2 valid tokens
+    assert cl[2, 2] == 0.0 and cl[2, 3] == 0.0
+    assert cl[2, 0].item() == float('-inf')
+    print("  ✓")
+
+    print("\nAll vtnk_pytorch checks passed.")
+
+
 if __name__ == "__main__":
     main()
     test_csr()
     test_csr_sorted_batch()
+    test_vtnk()

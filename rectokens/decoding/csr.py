@@ -9,6 +9,7 @@ class CompactCSRTrie(NamedTuple):
     stacked_cols_vals: torch.Tensor
     layer_max_branches: list[int]
     dense_lookup_mask: torch.Tensor
+    dense_states: torch.Tensor 
 
 
 def csr_from_trie(trie: Trie, vocab_size: int, dense_lookup_layers: int = 2) -> CompactCSRTrie:
@@ -16,7 +17,9 @@ def csr_from_trie(trie: Trie, vocab_size: int, dense_lookup_layers: int = 2) -> 
     col_idxs = []
     max_children_at_depth: dict[int, int] = {}
     dense_lookup_mask = torch.zeros([vocab_size] * dense_lookup_layers, dtype=torch.bool)
+    dense_states = torch.zeros([vocab_size] * dense_lookup_layers, dtype=torch.long)
 
+    next_bfs_idx = 1  # root is BFS row 0
     frontier: deque[tuple] = deque([(trie.root, 0, ())])
     while frontier:
         node, depth, path = frontier.popleft()
@@ -31,8 +34,10 @@ def csr_from_trie(trie: Trie, vocab_size: int, dense_lookup_layers: int = 2) -> 
 
             if len(child_path) == dense_lookup_layers:
                 dense_lookup_mask[child_path] = True
+                dense_states[child_path] = next_bfs_idx
 
             frontier.append((child, depth + 1, child_path))
+            next_bfs_idx += 1
 
     col_idxs.append(-1)
     values = list(range(1, len(col_idxs))) + [-1]
@@ -47,6 +52,7 @@ def csr_from_trie(trie: Trie, vocab_size: int, dense_lookup_layers: int = 2) -> 
         stacked_cols_vals=torch.stack([torch.tensor(col_idxs), torch.tensor(values)]),
         layer_max_branches=layer_max_branches,
         dense_lookup_mask=dense_lookup_mask,
+        dense_states=dense_states,
     )
 
 def csr_from_sorted_batch(sem_ids: torch.Tensor, vocab_size: int, dense_lookup_layers: int = 2):
@@ -91,11 +97,15 @@ def csr_from_sorted_batch(sem_ids: torch.Tensor, vocab_size: int, dense_lookup_l
     mask = torch.zeros([vocab_size]*dense_lookup_layers, dtype=torch.bool, device=sem_ids.device)
     mask[sem_ids[:, :dense_lookup_layers].unbind(-1)] = True
 
+    dense_states = torch.zeros([vocab_size] * dense_lookup_layers, dtype=torch.long, device=device)
+    dense_states[sem_ids[:, :dense_lookup_layers].unbind(-1)] = node_ids[dense_lookup_layers - 1]
+
     return CompactCSRTrie(
         row_ptrs=rows,
         stacked_cols_vals=torch.stack([cols, vals]),
         layer_max_branches=layer_max_branches,
         dense_lookup_mask=mask,
+        dense_states=dense_states,
     )
 
 
