@@ -4,10 +4,14 @@ assert torch.cuda.is_available(), "CUDA is required to import VTNK kernel."
 
 import triton
 import triton.language as tl
+
 from rectokens.decoding.schemas.compact_csr_trie import CompactCSRTrie
+from rectokens.decoding.vntk import vtnk_pytorch
 from torch.library import triton_op
 from torch.library import wrap_triton
 
+
+@triton_op("vtnk::constrained_node_transition", mutates_args={})
 def constrained_node_transition(
     logits: torch.Tensor, 
     cur_node: torch.Tensor, 
@@ -108,6 +112,22 @@ def constrained_node_transition_kernel(
 
     cols = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals, mask=children_mask, other=-1)
     next_node = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals + cols_vals_stride_0, mask=children_mask, other=0)
+
+
+constrained_node_transition.register_kernel("cpu")
+def constrained_node_transition_cpu(
+    logits: torch.Tensor, 
+    cur_node: torch.Tensor, 
+    constraint_transtions: CompactCSRTrie, 
+    step: int, 
+    vocab_size: int
+):
+    return vtnk_pytorch(logits, cur_node, constraint_transtions, step, vocab_size)
+
+    
+
+
+
 
 
 
