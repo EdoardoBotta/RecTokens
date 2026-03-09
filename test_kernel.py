@@ -26,7 +26,7 @@ def check(
     cur_node_gpu = cur_node.to(device)
 
     ref_nn, _, ref_cl = vtnk_pytorch(logits_gpu, cur_node_gpu, csr, step, vocab_size)
-    ker_nn, ker_cl = constrained_node_transition(logits_gpu, cur_node_gpu, csr, step, vocab_size)
+    ker_nn, _, ker_cl = constrained_node_transition(logits_gpu, cur_node_gpu, csr, step, vocab_size)
 
     assert ker_nn.shape == ref_nn.shape, (
         f"[{name}] next_node shape mismatch: kernel={ker_nn.shape}, ref={ref_nn.shape}"
