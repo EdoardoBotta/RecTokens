@@ -17,12 +17,13 @@ def constrained_node_transition(
     constraint_transitions: CompactCSRTrie,
     step: int,
     vocab_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Constrained node transition — GPU Triton kernel with CPU fallback.
 
-    Returns (next_node, corrected_logits):
+    Returns (next_node, valid_idxs, corrected_logits):
       next_node:        (B, max_branches) int64 — child BFS IDs, -1 for padding
+      valid_idxs:       (B, max_branches) int64 — valid token indices, -1 for padding
       corrected_logits: (B, vocab_size)  float  — logits zeroed for invalid tokens
     """
     max_branches = constraint_transitions.layer_max_branches[step]
@@ -44,7 +45,7 @@ def _constrained_node_transition_op(
     csr_cols_vals: torch.Tensor,
     max_branches: int,
     vocab_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, N = logits.shape
 
     assert cur_node.shape == (B,), f"Expected cur_node shape (B,), got {cur_node.shape}"
@@ -83,7 +84,7 @@ def _constrained_node_transition_op(
         max_branches=max_branches,
     )
 
-    return next_node, corrected_logits
+    return next_node, valid_idxs, corrected_logits
 
 
 @triton.jit
@@ -138,13 +139,14 @@ def _constrained_node_transition_kernel(
     csr_next_ptrs = tl.load(csr_trie_row_ptr + cur_node + 1, mask=cur_node >= 0, other=0)
     n_children = csr_next_ptrs - csr_row_ptrs
 
-    offs_cols_vals = csr_row_ptrs[:, None] + tl.arange(0, max_branches)
-    children_mask = n_children[:, None] > tl.arange(0, max_branches)[None, :]
+    slice_range = tl.arange(0, max_branches)
+    offs_cols_vals = csr_row_ptrs[:, None] + slice_range
+    children_mask = n_children[:, None] > slice_range[None, :]
 
     cols = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals, mask=children_mask, other=-1)
     next_node_vals = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals + cols_vals_stride_0, mask=children_mask, other=-1)
 
-    logits_correction_mask = tl.sum(cols[:,:,None] == offs_N[None, None, :], axis=1, dtype=tl.int1)
+    logits_correction_mask = tl.sum(cols[:, :, None] == offs_N[None, None, :], axis=1, dtype=tl.int1)
     corrected_logits = tl.where(logits_correction_mask, logits, float('-inf'))
     tl.store(corrected_logits_ptr + offs_B[:, None] * corrected_logits_stride_B + offs_N[None, :] * corrected_logits_stride_N, corrected_logits, mask=logits_mask)
 
