@@ -452,7 +452,7 @@ def test_vtnk() -> None:
     # ------------------------------------------------------------------
     print("\n--- vtnk B=1: root at step 0 ---")
     logits = uniform_logits(1, 8)
-    nn, vi, cl = vtnk_pytorch(logits, torch.tensor([0]), csr, step=0, vocab_size=8)
+    nn, vi, cl = vtnk_pytorch(logits, torch.tensor([0]), csr, step=0)
     assert nn.shape == vi.shape == (1, csr.layer_max_branches[0])
     assert cl.shape == (1, 8)
     assert sorted(nn[0][nn[0] >= 0].tolist()) == [1, 2]   # child BFS IDs
@@ -467,7 +467,7 @@ def test_vtnk() -> None:
     # ------------------------------------------------------------------
     print("\n--- vtnk B=2: both at root ---")
     logits = uniform_logits(2, 8)
-    nn, vi, cl = vtnk_pytorch(logits, torch.tensor([0, 0]), csr, step=0, vocab_size=8)
+    nn, vi, cl = vtnk_pytorch(logits, torch.tensor([0, 0]), csr, step=0)
     assert nn.shape == vi.shape == (2, csr.layer_max_branches[0])
     assert cl.shape == (2, 8)
     assert (nn[0] == nn[1]).all() and (vi[0] == vi[1]).all() and (cl[0] == cl[1]).all()
@@ -481,7 +481,7 @@ def test_vtnk() -> None:
     # ------------------------------------------------------------------
     print("\n--- vtnk B=2: two different nodes at step 1 ---")
     logits = uniform_logits(2, 8)
-    nn, vi, cl = vtnk_pytorch(logits, torch.tensor([1, 2]), csr, step=1, vocab_size=8)
+    nn, vi, cl = vtnk_pytorch(logits, torch.tensor([1, 2]), csr, step=1)
     assert nn.shape == vi.shape == (2, csr.layer_max_branches[1])
     assert cl.shape == (2, 8)
     assert nn[0, 0] == 3 and nn[1, 0] == 4       # child BFS IDs
@@ -496,7 +496,7 @@ def test_vtnk() -> None:
     # ------------------------------------------------------------------
     print("\n--- vtnk B=3: mixed branching at step 2 ---")
     logits = uniform_logits(3, 8)
-    nn, vi, cl = vtnk_pytorch(logits, torch.tensor([3, 3, 4]), csr, step=2, vocab_size=8)
+    nn, vi, cl = vtnk_pytorch(logits, torch.tensor([3, 3, 4]), csr, step=2)
     assert nn.shape == vi.shape == (3, csr.layer_max_branches[2])
     assert cl.shape == (3, 8)
     assert (nn[0] == nn[1]).all() and (vi[0] == vi[1]).all()  # same node → same row

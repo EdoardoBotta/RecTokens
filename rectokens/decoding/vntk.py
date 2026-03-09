@@ -1,7 +1,8 @@
 import torch
 
-def vtnk_pytorch(logits, cur_node, trie, step, vocab_size):
+def vtnk_pytorch(logits, cur_node, trie, step):
     device = trie.row_ptrs.device
+    B, vocab_size = logits.shape
     assert cur_node.dim() > 0
 
     idx_start = trie.row_ptrs[cur_node]           # (B,)
@@ -16,7 +17,6 @@ def vtnk_pytorch(logits, cur_node, trie, step, vocab_size):
     valid_idxs = torch.where(valid_range, cols, -1)
     next_node = torch.where(valid_range, vals, -1)
 
-    B = cur_node.shape[0]
     mask = torch.zeros(B, vocab_size, dtype=torch.bool, device=device)
     b_idx = torch.arange(B, device=device).unsqueeze(-1).expand_as(valid_idxs)
     valid = valid_idxs >= 0

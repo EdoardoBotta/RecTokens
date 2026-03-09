@@ -25,7 +25,7 @@ def check(
     logits_gpu = logits.to(device)
     cur_node_gpu = cur_node.to(device)
 
-    ref_nn, ref_vi, ref_cl = vtnk_pytorch(logits_gpu, cur_node_gpu, csr, step, vocab_size)
+    ref_nn, ref_vi, ref_cl = vtnk_pytorch(logits_gpu, cur_node_gpu, csr, step)
     ker_nn, ker_vi, ker_cl = constrained_node_transition(logits_gpu, cur_node_gpu, csr, step, vocab_size)
 
     assert ker_nn.shape == ref_nn.shape, (
@@ -123,7 +123,7 @@ def main() -> None:
     ref_nn0, _vi0, _cl0 = vtnk_pytorch(
         torch.randn(B7, vocab_size2, device=device),
         torch.zeros(B7, dtype=torch.long, device=device),
-        csr2, step=0, vocab_size=vocab_size2,
+        csr2, step=0,
     )
     next_nodes = ref_nn0[:, 0]  # first child of root for each element (all the same here)
     check(
