@@ -11,38 +11,60 @@ from torch.library import triton_op
 from torch.library import wrap_triton
 
 
-@triton_op("vtnk::constrained_node_transition", mutates_args={})
 def constrained_node_transition(
     logits: torch.Tensor,
     cur_node: torch.Tensor,
-    constraint_transtions: CompactCSRTrie,
+    constraint_transitions: CompactCSRTrie,
     step: int,
-    vocab_size: int):
+    vocab_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Constrained node transition — GPU Triton kernel with CPU fallback.
 
+    Returns (next_node, corrected_logits):
+      next_node:        (B, max_branches) int64 — child BFS IDs, -1 for padding
+      corrected_logits: (B, vocab_size)  float  — logits zeroed for invalid tokens
+    """
+    max_branches = constraint_transitions.layer_max_branches[step]
+    return _constrained_node_transition_op(
+        logits,
+        cur_node,
+        constraint_transitions.row_ptrs,
+        constraint_transitions.stacked_cols_vals,
+        max_branches,
+        vocab_size,
+    )
+
+
+@triton_op("vtnk::_constrained_node_transition_op", mutates_args={})
+def _constrained_node_transition_op(
+    logits: torch.Tensor,
+    cur_node: torch.Tensor,
+    csr_row_ptrs: torch.Tensor,
+    csr_cols_vals: torch.Tensor,
+    max_branches: int,
+    vocab_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, N = logits.shape
 
-    assert cur_node.shape == (B,), f"Expected cur_node shape to be (B,), got {cur_node.shape}"
-    assert step < len(constraint_transtions.layer_max_branches), f"Step {step} exceeds max depth of trie {len(constraint_transtions.layer_max_branches)}"
-    assert vocab_size >= constraint_transtions.stacked_cols_vals[0].max() + 1, f"Vocab size {vocab_size} does not match trie"
+    assert cur_node.shape == (B,), f"Expected cur_node shape (B,), got {cur_node.shape}"
 
     logits = logits.contiguous()
     cur_node = cur_node.contiguous()
-    csr_trie_cols_vals = constraint_transtions.stacked_cols_vals.contiguous()
-    csr_trie_rows = constraint_transtions.row_ptrs
+    csr_cols_vals = csr_cols_vals.contiguous()
 
     corrected_logits = torch.empty_like(logits)
-    max_branches = constraint_transtions.layer_max_branches[step]
     next_node = torch.empty(B, max_branches, dtype=cur_node.dtype, device=cur_node.device)
 
-    grid = lambda meta: (triton.cdiv(B, meta["BLOCK_B"])*triton.cdiv(N, meta["BLOCK_N"]),)
-    wrap_triton(constrained_node_transition_kernel)[grid](
+    grid = lambda meta: (triton.cdiv(B, meta["BLOCK_B"]) * triton.cdiv(N, meta["BLOCK_N"]),)
+    wrap_triton(_constrained_node_transition_kernel)[grid](
         logits_ptr=logits,
         cur_node_ptr=cur_node,
-        csr_trie_row_ptr=csr_trie_rows,
-        csr_trie_cols_vals_ptr=csr_trie_cols_vals,
+        csr_trie_row_ptr=csr_row_ptrs,
+        csr_trie_cols_vals_ptr=csr_cols_vals,
         logits_stride_B=logits.stride(0),
         logits_stride_N=logits.stride(1),
-        cols_vals_stride_0=csr_trie_cols_vals.stride(0),
+        cols_vals_stride_0=csr_cols_vals.stride(0),
         corrected_logits_ptr=corrected_logits,
         next_node_ptr=next_node,
         corrected_logits_stride_B=corrected_logits.stride(0),
@@ -57,8 +79,9 @@ def constrained_node_transition(
 
     return next_node, corrected_logits
 
+
 @triton.jit
-def constrained_node_transition_kernel(
+def _constrained_node_transition_kernel(
     # Inputs
     logits_ptr,
     cur_node_ptr,
@@ -80,7 +103,6 @@ def constrained_node_transition_kernel(
     GROUP_SIZE_M: tl.constexpr,
     max_branches: tl.constexpr,
 ):
-
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(B, BLOCK_B)
     num_pid_n = tl.cdiv(N, BLOCK_N)
@@ -114,8 +136,8 @@ def constrained_node_transition_kernel(
     # Build valid_mask[BLOCK_B, BLOCK_N]: True if token offs_N[n] is a valid child of cur_node[b]
     valid_mask = tl.zeros([BLOCK_B, BLOCK_N], dtype=tl.int1)
     for k in tl.static_range(max_branches):
-        col_k = tl.reshape(cols[:, k], [BLOCK_B, 1])       # (BLOCK_B, 1)
-        child_ok = tl.reshape(children_mask[:, k], [BLOCK_B, 1])  # (BLOCK_B, 1)
+        col_k = tl.reshape(cols[:, k], [BLOCK_B, 1])
+        child_ok = tl.reshape(children_mask[:, k], [BLOCK_B, 1])
         match = (col_k == offs_N[None, :]) & child_ok
         valid_mask = valid_mask | match
 
@@ -123,21 +145,8 @@ def constrained_node_transition_kernel(
     cl_ptrs = corrected_logits_ptr + offs_B[:, None] * corrected_logits_stride_B + offs_N[None, :] * corrected_logits_stride_N
     tl.store(cl_ptrs, corrected_logits, mask=logits_mask)
 
-    # Write next_node[b, k] — only the first N-tile writes to avoid redundant stores racing
+    # Write next_node[b, k] — only the first N-tile writes to avoid redundant stores
     offs_k = tl.arange(0, max_branches)
     nn_ptrs = next_node_ptr + offs_B[:, None] * max_branches + offs_k[None, :]
-    nn_mask = offs_B[:, None] < B
     if pid_N == 0:
-        tl.store(nn_ptrs, next_node_vals, mask=nn_mask)
-
-
-constrained_node_transition.register_kernel("cpu")
-def constrained_node_transition_cpu(
-    logits: torch.Tensor,
-    cur_node: torch.Tensor,
-    constraint_transtions: CompactCSRTrie,
-    step: int,
-    vocab_size: int
-):
-    next_node, _, corrected_logits = vtnk_pytorch(logits, cur_node, constraint_transtions, step, vocab_size)
-    return next_node, corrected_logits
+        tl.store(nn_ptrs, next_node_vals, mask=offs_B[:, None] < B)
