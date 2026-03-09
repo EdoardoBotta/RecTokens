@@ -24,4 +24,4 @@ def vtnk_pytorch(logits, cur_node, trie, step, vocab_size):
 
     corrected_logits = torch.where(mask, logits, float('-inf'))
 
-    return next_node, corrected_logits
+    return next_node, valid_idxs, corrected_logits

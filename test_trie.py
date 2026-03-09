@@ -452,58 +452,58 @@ def test_vtnk() -> None:
     # ------------------------------------------------------------------
     print("\n--- vtnk B=1: root at step 0 ---")
     logits = uniform_logits(1, 8)
-    nn, cl = vtnk_pytorch(logits, torch.tensor([0]), csr, step=0, vocab_size=8)
-    assert nn.shape == (1, csr.layer_max_branches[0])
+    nn, vi, cl = vtnk_pytorch(logits, torch.tensor([0]), csr, step=0, vocab_size=8)
+    assert nn.shape == vi.shape == (1, csr.layer_max_branches[0])
     assert cl.shape == (1, 8)
-    assert sorted(nn[0][nn[0] >= 0].tolist()) == [1, 2]
-    assert cl[0, 1] == 0.0 and cl[0, 3] == 0.0       # valid tokens keep logit
-    assert cl[0, 0].item() == float('-inf')            # invalid tokens masked to -inf
-    assert (cl[0] > float('-inf')).sum() == 2          # exactly 2 valid tokens
-    print("  ✓")
-
-    # ------------------------------------------------------------------
-    # 2. Two beams at root (same node) — corrected logits must be identical
-    # ------------------------------------------------------------------
-    print("\n--- vtnk B=2: both at root ---")
-    logits = uniform_logits(2, 8)
-    nn, cl = vtnk_pytorch(logits, torch.tensor([0, 0]), csr, step=0, vocab_size=8)
-    assert nn.shape == (2, csr.layer_max_branches[0])
-    assert cl.shape == (2, 8)
-    assert (cl[0] == cl[1]).all()
-    assert cl[0, 1] == 0.0 and cl[0, 3] == 0.0
+    assert sorted(nn[0][nn[0] >= 0].tolist()) == [1, 2]   # child BFS IDs
+    assert sorted(vi[0][vi[0] >= 0].tolist()) == [1, 3]   # valid tokens (1 and 3)
+    assert cl[0, 1] == 0.0 and cl[0, 3] == 0.0            # valid tokens keep logit
+    assert cl[0, 0].item() == float('-inf')                # invalid → -inf
     assert (cl[0] > float('-inf')).sum() == 2
     print("  ✓")
 
     # ------------------------------------------------------------------
-    # 3. Two beams at different step-1 nodes — per-beam corrected logits differ
-    #    node 1 → token 2 (child BFS 3); node 2 → token 1 (child BFS 4)
+    # 2. Two beams at root (same node) — all outputs identical across beams
+    # ------------------------------------------------------------------
+    print("\n--- vtnk B=2: both at root ---")
+    logits = uniform_logits(2, 8)
+    nn, vi, cl = vtnk_pytorch(logits, torch.tensor([0, 0]), csr, step=0, vocab_size=8)
+    assert nn.shape == vi.shape == (2, csr.layer_max_branches[0])
+    assert cl.shape == (2, 8)
+    assert (nn[0] == nn[1]).all() and (vi[0] == vi[1]).all() and (cl[0] == cl[1]).all()
+    assert sorted(vi[0][vi[0] >= 0].tolist()) == [1, 3]
+    assert (cl[0] > float('-inf')).sum() == 2
+    print("  ✓")
+
+    # ------------------------------------------------------------------
+    # 3. Two beams at different step-1 nodes — per-beam outputs differ
+    #    node 1 → token 2, child BFS 3; node 2 → token 1, child BFS 4
     # ------------------------------------------------------------------
     print("\n--- vtnk B=2: two different nodes at step 1 ---")
     logits = uniform_logits(2, 8)
-    nn, cl = vtnk_pytorch(logits, torch.tensor([1, 2]), csr, step=1, vocab_size=8)
-    assert nn.shape == (2, csr.layer_max_branches[1])
+    nn, vi, cl = vtnk_pytorch(logits, torch.tensor([1, 2]), csr, step=1, vocab_size=8)
+    assert nn.shape == vi.shape == (2, csr.layer_max_branches[1])
     assert cl.shape == (2, 8)
-    assert nn[0, 0] == 3 and nn[1, 0] == 4
+    assert nn[0, 0] == 3 and nn[1, 0] == 4       # child BFS IDs
+    assert vi[0, 0] == 2 and vi[1, 0] == 1       # valid tokens
     assert cl[0, 2] == 0.0 and cl[0, 1].item() == float('-inf')
     assert cl[1, 1] == 0.0 and cl[1, 2].item() == float('-inf')
-    assert (cl[0] > float('-inf')).sum() == 1
-    assert (cl[1] > float('-inf')).sum() == 1
     print("  ✓")
 
     # ------------------------------------------------------------------
     # 4. Three beams at step 2: nodes 3, 3, 4
-    #    node 3 → token 1 (child BFS 5); node 4 → tokens 2,3 (children BFS 6,7)
+    #    node 3 → token 1, child BFS 5; node 4 → tokens 2,3, children BFS 6,7
     # ------------------------------------------------------------------
     print("\n--- vtnk B=3: mixed branching at step 2 ---")
     logits = uniform_logits(3, 8)
-    nn, cl = vtnk_pytorch(logits, torch.tensor([3, 3, 4]), csr, step=2, vocab_size=8)
-    assert nn.shape == (3, csr.layer_max_branches[2])
+    nn, vi, cl = vtnk_pytorch(logits, torch.tensor([3, 3, 4]), csr, step=2, vocab_size=8)
+    assert nn.shape == vi.shape == (3, csr.layer_max_branches[2])
     assert cl.shape == (3, 8)
-    assert (nn[0] == nn[1]).all()
+    assert (nn[0] == nn[1]).all() and (vi[0] == vi[1]).all()  # same node → same row
     assert sorted(nn[2][nn[2] >= 0].tolist()) == [6, 7]
-    assert (cl[0] > float('-inf')).sum() == 1          # node 3: 1 valid token
-    assert (cl[1] > float('-inf')).sum() == 1
-    assert (cl[2] > float('-inf')).sum() == 2          # node 4: 2 valid tokens
+    assert sorted(vi[2][vi[2] >= 0].tolist()) == [2, 3]
+    assert (cl[0] > float('-inf')).sum() == 1
+    assert (cl[2] > float('-inf')).sum() == 2
     assert cl[2, 2] == 0.0 and cl[2, 3] == 0.0
     assert cl[2, 0].item() == float('-inf')
     print("  ✓")
