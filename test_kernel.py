@@ -25,17 +25,23 @@ def check(
     logits_gpu = logits.to(device)
     cur_node_gpu = cur_node.to(device)
 
-    ref_nn, _, ref_cl = vtnk_pytorch(logits_gpu, cur_node_gpu, csr, step, vocab_size)
-    ker_nn, ker_cl = constrained_node_transition(logits_gpu, cur_node_gpu, csr, step, vocab_size)
+    ref_nn, ref_vi, ref_cl = vtnk_pytorch(logits_gpu, cur_node_gpu, csr, step, vocab_size)
+    ker_nn, ker_vi, ker_cl = constrained_node_transition(logits_gpu, cur_node_gpu, csr, step, vocab_size)
 
     assert ker_nn.shape == ref_nn.shape, (
         f"[{name}] next_node shape mismatch: kernel={ker_nn.shape}, ref={ref_nn.shape}"
+    )
+    assert ker_vi.shape == ref_vi.shape, (
+        f"[{name}] valid_idxs shape mismatch: kernel={ker_vi.shape}, ref={ref_vi.shape}"
     )
     assert ker_cl.shape == ref_cl.shape, (
         f"[{name}] corrected_logits shape mismatch: kernel={ker_cl.shape}, ref={ref_cl.shape}"
     )
     assert torch.equal(ker_nn, ref_nn), (
         f"[{name}] next_node mismatch:\n  kernel={ker_nn}\n  ref={ref_nn}"
+    )
+    assert torch.equal(ker_vi, ref_vi), (
+        f"[{name}] valid_idxs mismatch:\n  kernel={ker_vi}\n  ref={ref_vi}"
     )
     assert torch.allclose(ker_cl, ref_cl, equal_nan=True), (
         f"[{name}] corrected_logits mismatch:\n  kernel={ker_cl}\n  ref={ref_cl}"
@@ -114,7 +120,7 @@ def main() -> None:
         csr2, step=0, vocab_size=vocab_size2, device=device,
     )
     # advance to step 1: pick the first valid child for each batch element
-    ref_nn0, _, _ = vtnk_pytorch(
+    ref_nn0, _vi0, _cl0 = vtnk_pytorch(
         torch.randn(B7, vocab_size2, device=device),
         torch.zeros(B7, dtype=torch.long, device=device),
         csr2, step=0, vocab_size=vocab_size2,
@@ -126,6 +132,43 @@ def main() -> None:
         next_nodes.cpu(),
         csr2, step=1, vocab_size=vocab_size2, device=device,
     )
+
+    # ------------------------------------------------------------------ #
+    # valid_idxs correctness: verify semantic content, not just ref match
+    # ------------------------------------------------------------------ #
+    print("\nvalid_idxs correctness tests:")
+
+    def check_valid_idxs(name: str, cur_node: torch.Tensor, csr, step: int, expected_tokens_per_batch: list[list[int]], device: torch.device) -> None:
+        """
+        Verify that valid_idxs for each batch element contains exactly the
+        expected token indices (in any order), with -1 padding for the rest.
+        """
+        dummy_logits = torch.zeros(cur_node.shape[0], vocab_size, device=device)
+        _, vi, _ = constrained_node_transition(dummy_logits, cur_node.to(device), csr, step, vocab_size)
+        for b, expected in enumerate(expected_tokens_per_batch):
+            actual = sorted(vi[b][vi[b] >= 0].tolist())
+            assert actual == sorted(expected), (
+                f"[{name}] batch {b}: valid_idxs={actual}, expected={expected}"
+            )
+            assert (vi[b][vi[b] < 0] == -1).all(), (
+                f"[{name}] batch {b}: padding entries should be -1, got {vi[b][vi[b] < 0].tolist()}"
+            )
+            assert vi[b].shape[0] == csr.layer_max_branches[step], (
+                f"[{name}] batch {b}: static length should be layer_max_branches[{step}]={csr.layer_max_branches[step]}, got {vi[b].shape[0]}"
+            )
+        print(f"  PASS  {name}")
+
+    # node 0 (root): children tokens {1, 3}
+    check_valid_idxs("root has tokens {1,3}", torch.tensor([0]), csr, step=0, expected_tokens_per_batch=[[1, 3]], device=device)
+
+    # node 1: child token {2}; node 2: child token {1} — different children per batch element
+    check_valid_idxs("nodes[1,2] have tokens {2},{1}", torch.tensor([1, 2]), csr, step=1, expected_tokens_per_batch=[[2], [1]], device=device)
+
+    # node 4: children tokens {2, 3}
+    check_valid_idxs("node 4 has tokens {2,3}", torch.tensor([4]), csr, step=2, expected_tokens_per_batch=[[2, 3]], device=device)
+
+    # node 3: child token {1}; node 4: children tokens {2, 3} — mixed branch counts
+    check_valid_idxs("nodes[3,4] have tokens {1},{2,3}", torch.tensor([3, 4]), csr, step=2, expected_tokens_per_batch=[[1], [2, 3]], device=device)
 
     print("\nAll checks passed.")
 
