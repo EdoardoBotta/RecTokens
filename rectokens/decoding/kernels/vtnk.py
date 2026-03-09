@@ -145,6 +145,6 @@ def _constrained_node_transition_kernel(
 
     if pid_N == 0:
         next_node_ptrs = next_node_ptr + offs_B[:, None] * next_node_stride_B + tl.arange(0, max_branches) * next_node_stride_N
-        tl.store(next_node_ptrs, next_node_vals, mask=children_mask)
+        tl.store(next_node_ptrs, next_node_vals, mask=offs_B[:, None] < B)
 
 
