@@ -55,6 +55,7 @@ def _constrained_node_transition_op(
 
     corrected_logits = torch.empty_like(logits)
     next_node = cur_node.new_empty(B, max_branches)
+    valid_idxs = cur_node.new_empty(B, max_branches)
 
     grid = lambda meta: (triton.cdiv(B, meta["BLOCK_B"]) * triton.cdiv(N, meta["BLOCK_N"]),)
     wrap_triton(_constrained_node_transition_kernel)[grid](
@@ -67,10 +68,13 @@ def _constrained_node_transition_op(
         cols_vals_stride_0=csr_cols_vals.stride(0),
         corrected_logits_ptr=corrected_logits,
         next_node_ptr=next_node,
+        valid_idxs_ptr=valid_idxs,
         corrected_logits_stride_B=corrected_logits.stride(0),
         corrected_logits_stride_N=corrected_logits.stride(1),
         next_node_stride_B=next_node.stride(0),
         next_node_stride_N=next_node.stride(1),
+        valid_idxs_stride_B=valid_idxs.stride(0),
+        valid_idxs_stride_N=valid_idxs.stride(1),
         B=B,
         N=N,
         BLOCK_B=64,
@@ -95,10 +99,13 @@ def _constrained_node_transition_kernel(
     # Outputs
     corrected_logits_ptr,
     next_node_ptr,
+    valid_idxs_ptr,
     corrected_logits_stride_B,
     corrected_logits_stride_N,
     next_node_stride_B,
     next_node_stride_N,
+    valid_idxs_stride_B,
+    valid_idxs_stride_N,
     # Constants
     B: tl.constexpr,
     N: tl.constexpr,
@@ -143,6 +150,7 @@ def _constrained_node_transition_kernel(
 
     if pid_N == 0:
         next_node_ptrs = next_node_ptr + offs_B[:, None] * next_node_stride_B + tl.arange(0, max_branches) * next_node_stride_N
+        valid_idxs_ptrs = valid_idxs_ptr + offs_B[:, None] * valid_idxs_stride_B + tl.arange(0, max_branches) * valid_idxs_stride_N
         tl.store(next_node_ptrs, next_node_vals, mask=offs_B[:, None] < B)
-
+        tl.store(valid_idxs_ptrs, cols, mask=offs_B[:, None] < B)
 
