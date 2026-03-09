@@ -10,7 +10,7 @@ from rectokens.decoding.vntk import vtnk_pytorch
 from torch.library import triton_op
 from torch.library import wrap_triton
 
-
+# TODO: Add merged linear + constrained_node_transition kernel to avoid materializing uncorrected logits to memory.
 def constrained_node_transition(
     logits: torch.Tensor,
     cur_node: torch.Tensor,
@@ -54,7 +54,7 @@ def _constrained_node_transition_op(
     csr_cols_vals = csr_cols_vals.contiguous()
 
     corrected_logits = torch.empty_like(logits)
-    next_node = torch.empty(B, max_branches, dtype=cur_node.dtype, device=cur_node.device)
+    next_node = cur_node.new_empty(B, max_branches)
 
     grid = lambda meta: (triton.cdiv(B, meta["BLOCK_B"]) * triton.cdiv(N, meta["BLOCK_N"]),)
     wrap_triton(_constrained_node_transition_kernel)[grid](
@@ -69,6 +69,8 @@ def _constrained_node_transition_op(
         next_node_ptr=next_node,
         corrected_logits_stride_B=corrected_logits.stride(0),
         corrected_logits_stride_N=corrected_logits.stride(1),
+        next_node_stride_B=next_node.stride(0),
+        next_node_stride_N=next_node.stride(1),
         B=B,
         N=N,
         BLOCK_B=64,
@@ -95,6 +97,8 @@ def _constrained_node_transition_kernel(
     next_node_ptr,
     corrected_logits_stride_B,
     corrected_logits_stride_N,
+    next_node_stride_B,
+    next_node_stride_N,
     # Constants
     B: tl.constexpr,
     N: tl.constexpr,
@@ -133,20 +137,14 @@ def _constrained_node_transition_kernel(
     cols = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals, mask=children_mask, other=-1)
     next_node_vals = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals + cols_vals_stride_0, mask=children_mask, other=-1)
 
-    # Build valid_mask[BLOCK_B, BLOCK_N]: True if token offs_N[n] is a valid child of cur_node[b]
-    valid_mask = tl.zeros([BLOCK_B, BLOCK_N], dtype=tl.int1)
-    for k in tl.static_range(max_branches):
-        col_k = tl.reshape(cols[:, k], [BLOCK_B, 1])
-        child_ok = tl.reshape(children_mask[:, k], [BLOCK_B, 1])
-        match = (col_k == offs_N[None, :]) & child_ok
-        valid_mask = valid_mask | match
+    logits_correction_mask = tl.sum(cols[:,:,None] == offs_N[None, None, :], axis=1, dtype=tl.int1)
+    corrected_logits = tl.where(logits_correction_mask, logits, float('-inf'))
+    tl.store(corrected_logits_ptr + offs_B[:, None] * corrected_logits_stride_B + offs_N[None, :] * corrected_logits_stride_N, corrected_logits, mask=logits_mask)
 
-    corrected_logits = tl.where(valid_mask, logits, float('-inf'))
-    cl_ptrs = corrected_logits_ptr + offs_B[:, None] * corrected_logits_stride_B + offs_N[None, :] * corrected_logits_stride_N
-    tl.store(cl_ptrs, corrected_logits, mask=logits_mask)
 
-    # Write next_node[b, k] — only the first N-tile writes to avoid redundant stores
-    offs_k = tl.arange(0, max_branches)
-    nn_ptrs = next_node_ptr + offs_B[:, None] * max_branches + offs_k[None, :]
+
     if pid_N == 0:
-        tl.store(nn_ptrs, next_node_vals, mask=offs_B[:, None] < B)
+        next_node_ptrs = next_node_ptr + offs_B[:, None] * next_node_stride_B + tl.arange(0, max_branches) * next_node_stride_N
+        tl.store(next_node_ptrs, next_node_vals, mask=children_mask)
+
+
