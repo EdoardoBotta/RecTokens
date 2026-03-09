@@ -1,15 +1,8 @@
 import torch
 from collections import deque
 from rectokens.decoding.trie import Trie
+from rectokens.decoding.schemas.compact_csr_trie import CompactCSRTrie
 from typing import NamedTuple
-
-
-class CompactCSRTrie(NamedTuple):
-    row_ptrs: torch.Tensor
-    stacked_cols_vals: torch.Tensor
-    layer_max_branches: list[int]
-    dense_lookup_mask: torch.Tensor
-    dense_states: torch.Tensor 
 
 
 def csr_from_trie(trie: Trie, vocab_size: int, dense_lookup_layers: int = 2) -> CompactCSRTrie:
