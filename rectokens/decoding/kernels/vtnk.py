@@ -141,8 +141,6 @@ def _constrained_node_transition_kernel(
     corrected_logits = tl.where(logits_correction_mask, logits, float('-inf'))
     tl.store(corrected_logits_ptr + offs_B[:, None] * corrected_logits_stride_B + offs_N[None, :] * corrected_logits_stride_N, corrected_logits, mask=logits_mask)
 
-
-
     if pid_N == 0:
         next_node_ptrs = next_node_ptr + offs_B[:, None] * next_node_stride_B + tl.arange(0, max_branches) * next_node_stride_N
         tl.store(next_node_ptrs, next_node_vals, mask=children_mask)
