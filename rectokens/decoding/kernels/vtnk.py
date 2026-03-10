@@ -225,18 +225,24 @@ def _constrained_node_transition_kernel(
     csr_next_ptrs = tl.load(csr_trie_row_ptr + cur_node + 1, mask=cur_node >= 0, other=0)
     n_children = csr_next_ptrs - csr_row_ptrs
 
-    slice_range = tl.arange(0, max_branches)
-    offs_cols_vals = csr_row_ptrs[:, None] + slice_range
-    children_mask = n_children[:, None] > slice_range[None, :]
-
-    cols = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals, mask=children_mask, other=-1)
-    next_node_vals = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals + cols_vals_stride_0, mask=children_mask, other=-1)
-
-    logits_correction_mask = tl.sum(cols[:, :, None] == offs_N[None, None, :], axis=1, dtype=tl.int1)
+    b_valid = offs_B < B
+    logits_correction_mask = tl.zeros([BLOCK_B, BLOCK_N], dtype=tl.int1)
+    for k in tl.static_range(max_branches):
+        col_k = tl.load(
+            csr_trie_cols_vals_ptr + csr_row_ptrs + k,
+            mask=b_valid & (n_children > k),
+            other=-1,
+        )
+        logits_correction_mask = logits_correction_mask | (tl.reshape(col_k, [BLOCK_B, 1]) == offs_N[None, :])
     corrected_logits = tl.where(logits_correction_mask, logits, float('-inf'))
     tl.store(corrected_logits_ptr + offs_B[:, None] * corrected_logits_stride_B + offs_N[None, :] * corrected_logits_stride_N, corrected_logits, mask=logits_mask)
 
     if pid_N == 0:
+        slice_range = tl.arange(0, max_branches)
+        offs_cols_vals = csr_row_ptrs[:, None] + slice_range
+        children_mask = n_children[:, None] > slice_range[None, :]
+        cols = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals, mask=children_mask, other=-1)
+        next_node_vals = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals + cols_vals_stride_0, mask=children_mask, other=-1)
         next_node_ptrs = next_node_ptr + offs_B[:, None] * next_node_stride_B + tl.arange(0, max_branches) * next_node_stride_N
         valid_idxs_ptrs = valid_idxs_ptr + offs_B[:, None] * valid_idxs_stride_B + tl.arange(0, max_branches) * valid_idxs_stride_N
         tl.store(next_node_ptrs, next_node_vals, mask=offs_B[:, None] < B)
@@ -314,18 +320,24 @@ def _fused_linear_constrained_node_transition_kernel(
     csr_next_ptrs = tl.load(csr_trie_row_ptr + cur_node + 1, mask=cur_node >= 0, other=0)
     n_children = csr_next_ptrs - csr_row_ptrs
 
-    slice_range = tl.arange(0, max_branches)
-    offs_cols_vals = csr_row_ptrs[:, None] + slice_range
-    children_mask = n_children[:, None] > slice_range[None, :]
-
-    cols = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals, mask=children_mask, other=-1)
-    next_node_vals = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals + cols_vals_stride_0, mask=children_mask, other=-1)
-
-    logits_correction_mask = tl.sum(cols[:, :, None] == offs_N[None, None, :], axis=1, dtype=tl.int1)
+    b_valid = offs_B < B
+    logits_correction_mask = tl.zeros([BLOCK_B, BLOCK_N], dtype=tl.int1)
+    for k in tl.static_range(max_branches):
+        col_k = tl.load(
+            csr_trie_cols_vals_ptr + csr_row_ptrs + k,
+            mask=b_valid & (n_children > k),
+            other=-1,
+        )
+        logits_correction_mask = logits_correction_mask | (tl.reshape(col_k, [BLOCK_B, 1]) == offs_N[None, :])
     corrected_logits = tl.where(logits_correction_mask, logits, float('-inf'))
     tl.store(corrected_logits_ptr + offs_B[:, None] * corrected_logits_stride_B + offs_N[None, :] * corrected_logits_stride_N, corrected_logits, mask=logits_mask)
 
     if pid_N == 0:
+        slice_range = tl.arange(0, max_branches)
+        offs_cols_vals = csr_row_ptrs[:, None] + slice_range
+        children_mask = n_children[:, None] > slice_range[None, :]
+        cols = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals, mask=children_mask, other=-1)
+        next_node_vals = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals + cols_vals_stride_0, mask=children_mask, other=-1)
         next_node_ptrs = next_node_ptr + offs_B[:, None] * next_node_stride_B + tl.arange(0, max_branches) * next_node_stride_N
         valid_idxs_ptrs = valid_idxs_ptr + offs_B[:, None] * valid_idxs_stride_B + tl.arange(0, max_branches) * valid_idxs_stride_N
         tl.store(next_node_ptrs, next_node_vals, mask=offs_B[:, None] < B)
