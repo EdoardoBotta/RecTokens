@@ -7,8 +7,11 @@ import triton.language as tl
 
 from rectokens.decoding.schemas.compact_csr_trie import CompactCSRTrie
 from rectokens.decoding.vntk import vtnk_pytorch
+from rectokens.decoding.kernels.utils import tl_fp32_to_tf32
 from torch.library import triton_op
 from torch.library import wrap_triton
+
+IS_PTX_RNA_TF32_SUPPORTED = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 8
 
 def fused_linear_constrained_node_transition(
     a: torch.Tensor,
@@ -90,6 +93,7 @@ def _fused_linear_constrained_node_transition_op(
         BLOCK_K=32,
         GROUP_SIZE_M=4,
         max_branches=max_branches,
+        FP32_TO_TF32_MAX_PRECISION=IS_PTX_RNA_TF32_SUPPORTED,
     )
 
     return next_node, valid_idxs, corrected_logits
@@ -164,6 +168,7 @@ def _constrained_node_transition_op(
         BLOCK_N=64,
         GROUP_SIZE_M=4,
         max_branches=max_branches,
+        FP32_TO_TF32_MAX_PRECISION=IS_PTX_RNA_TF32_SUPPORTED,
     )
 
     return next_node, valid_idxs, corrected_logits
@@ -196,6 +201,7 @@ def _constrained_node_transition_kernel(
     BLOCK_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     max_branches: tl.constexpr,
+    FP32_TO_TF32_MAX_PRECISION: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(B, BLOCK_B)
@@ -270,6 +276,7 @@ def _fused_linear_constrained_node_transition_kernel(
     BLOCK_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     max_branches: tl.constexpr,
+    FP32_TO_TF32_MAX_PRECISION: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(B, BLOCK_B)
@@ -293,9 +300,12 @@ def _fused_linear_constrained_node_transition_kernel(
     for k in range(0, tl.cdiv(K, BLOCK_K)):
         a = tl.load(a_ptrs, mask=offs_K[None, :] < K - k * BLOCK_K, other=0.0)
         b = tl.load(b_ptrs, mask=offs_K[:, None] < K - k * BLOCK_K, other=0.0)
-        # We accumulate along the K dimension.
+        
+        if FP32_TO_TF32_MAX_PRECISION:
+            a = tl_fp32_to_tf32(a)
+            b = tl_fp32_to_tf32(b)
         logits = tl.dot(a, b, logits)
-        # Advance the ptrs to the next K block.
+
         a_ptrs += BLOCK_K * a_stride_K
         b_ptrs += BLOCK_K * b_stride_K
 
