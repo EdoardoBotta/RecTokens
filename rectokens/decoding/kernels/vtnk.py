@@ -294,7 +294,7 @@ def _fused_linear_constrained_node_transition_kernel(
         a = tl.load(a_ptrs, mask=offs_K[None, :] < K - k * BLOCK_K, other=0.0)
         b = tl.load(b_ptrs, mask=offs_K[:, None] < K - k * BLOCK_K, other=0.0)
         # We accumulate along the K dimension.
-        logits = tl.dot(a, b, logits, enable_tf32=True)
+        logits = tl.dot(a, b, logits)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_K * a_stride_K
         b_ptrs += BLOCK_K * b_stride_K
@@ -313,9 +313,7 @@ def _fused_linear_constrained_node_transition_kernel(
     cols = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals, mask=children_mask, other=-1)
     next_node_vals = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals + cols_vals_stride_0, mask=children_mask, other=-1)
 
-    logits_correction_mask = tl.zeros([BLOCK_B, BLOCK_N], dtype=tl.int1)
-    for k in tl.static_range(max_branches):
-        logits_correction_mask = logits_correction_mask | (tl.reshape(cols[:, k], [BLOCK_B, 1]) == offs_N[None, :])
+    logits_correction_mask = tl.sum(cols[:,:,None] == offs_N[None, None, :], axis=1, dtype=tl.int1)
     corrected_logits = tl.where(logits_correction_mask, logits, float('-inf'))
     tl.store(corrected_logits_ptr + offs_B[:, None] * corrected_logits_stride_B + offs_N[None, :] * corrected_logits_stride_N, corrected_logits, mask=logits_mask)
 
