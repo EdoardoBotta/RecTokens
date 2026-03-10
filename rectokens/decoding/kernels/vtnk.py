@@ -234,7 +234,7 @@ def _constrained_node_transition_kernel(
     cols = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals, mask=children_mask, other=-1)
     next_node_vals = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals + cols_vals_stride_0, mask=children_mask, other=-1)
 
-    logits_correction_mask = tl.sum(cols[:,:,None] == offs_N[None, None, :], axis=1, dtype=tl.int1)
+    logits_correction_mask = tl.sum(cols[:, :, None] == offs_N[None, None, :], axis=1, dtype=tl.int1)
     corrected_logits = tl.where(logits_correction_mask, logits, float('-inf'))
     tl.store(corrected_logits_ptr + offs_B[:, None] * corrected_logits_stride_B + offs_N[None, :] * corrected_logits_stride_N, corrected_logits, mask=logits_mask)
 
@@ -298,9 +298,9 @@ def _fused_linear_constrained_node_transition_kernel(
     
     logits = tl.zeros((BLOCK_B, BLOCK_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_K)):
-        a = tl.load(a_ptrs, mask=offs_K[None, :] < K - k * BLOCK_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_K[:, None] < K - k * BLOCK_K, other=0.0)
-        
+        a = tl.load(a_ptrs, mask=(offs_B[:, None] < B) & (offs_K[None, :] < K - k * BLOCK_K), other=0.0)
+        b = tl.load(b_ptrs, mask=(offs_K[:, None] < K - k * BLOCK_K) & (offs_N[None, :] < N), other=0.0)
+
         if FP32_TO_TF32_MAX_PRECISION:
             a = tl_fp32_to_tf32(a)
             b = tl_fp32_to_tf32(b)
@@ -310,7 +310,7 @@ def _fused_linear_constrained_node_transition_kernel(
         b_ptrs += BLOCK_K * b_stride_K
 
     logits_mask = (offs_B[:, None] < B) & (offs_N[None, :] < N)
-    
+
     cur_node = tl.load(cur_node_ptrs, mask=offs_B < B, other=-1)
     csr_row_ptrs = tl.load(csr_trie_row_ptr + cur_node, mask=cur_node >= 0, other=0)
     csr_next_ptrs = tl.load(csr_trie_row_ptr + cur_node + 1, mask=cur_node >= 0, other=0)
@@ -323,7 +323,7 @@ def _fused_linear_constrained_node_transition_kernel(
     cols = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals, mask=children_mask, other=-1)
     next_node_vals = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals + cols_vals_stride_0, mask=children_mask, other=-1)
 
-    logits_correction_mask = tl.sum(cols[:,:,None] == offs_N[None, None, :], axis=1, dtype=tl.int1)
+    logits_correction_mask = tl.sum(cols[:, :, None] == offs_N[None, None, :], axis=1, dtype=tl.int1)
     corrected_logits = tl.where(logits_correction_mask, logits, float('-inf'))
     tl.store(corrected_logits_ptr + offs_B[:, None] * corrected_logits_stride_B + offs_N[None, :] * corrected_logits_stride_N, corrected_logits, mask=logits_mask)
 
