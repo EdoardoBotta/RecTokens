@@ -328,7 +328,7 @@ def _fused_linear_constrained_node_transition_kernel(
             mask=b_valid & (n_children > k),
             other=-1,
         )
-        logits_correction_mask = logits_correction_mask | (tl.reshape(col_k, [BLOCK_B, 1]) == offs_N[None, :])
+        logits_correction_mask = logits_correction_mask | (col_k[:, None] == offs_N[None, :])
     corrected_logits = tl.where(logits_correction_mask, logits, float('-inf'))
     tl.store(corrected_logits_ptr + offs_B[:, None] * corrected_logits_stride_B + offs_N[None, :] * corrected_logits_stride_N, corrected_logits, mask=logits_mask)
 
