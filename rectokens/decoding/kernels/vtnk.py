@@ -168,7 +168,6 @@ def _constrained_node_transition_op(
         BLOCK_N=64,
         GROUP_SIZE_M=4,
         max_branches=max_branches,
-        FP32_TO_TF32_MAX_PRECISION=IS_PTX_RNA_TF32_SUPPORTED,
     )
 
     return next_node, valid_idxs, corrected_logits
@@ -201,7 +200,6 @@ def _constrained_node_transition_kernel(
     BLOCK_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     max_branches: tl.constexpr,
-    FP32_TO_TF32_MAX_PRECISION: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(B, BLOCK_B)
