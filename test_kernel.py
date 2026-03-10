@@ -201,7 +201,7 @@ def main() -> None:
         assert torch.equal(ker_vi, ref_vi), f"[{name}] valid_idxs mismatch:\n  kernel={ker_vi}\n  ref={ref_vi}"
         # atol for tf32 accumulation differences
         assert torch.allclose(ker_cl, ref_cl, atol=1e-2, equal_nan=True), (
-            f"[{name}] corrected_logits mismatch (max diff={( ker_cl - ref_cl).abs().max():.4f})"
+            f"[{name}] corrected_logits mismatch (max diff={( (ker_cl - ref_cl)[torch.isfinite(ker_cl - ref_cl)]).abs().max():.4f})"
         )
         print(f"  PASS  {name}")
 
