@@ -228,9 +228,7 @@ def _constrained_node_transition_kernel(
     cols = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals, mask=children_mask, other=-1)
     next_node_vals = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals + cols_vals_stride_0, mask=children_mask, other=-1)
 
-    logits_correction_mask = tl.zeros([BLOCK_B, BLOCK_N], dtype=tl.int1)
-    for k in tl.static_range(max_branches):
-        logits_correction_mask = logits_correction_mask | (tl.reshape(cols[:, k], [BLOCK_B, 1]) == offs_N[None, :])
+    logits_correction_mask = tl.sum(cols[:,:,None] == offs_N[None, None, :], axis=1, dtype=tl.int1)
     corrected_logits = tl.where(logits_correction_mask, logits, float('-inf'))
     tl.store(corrected_logits_ptr + offs_B[:, None] * corrected_logits_stride_B + offs_N[None, :] * corrected_logits_stride_N, corrected_logits, mask=logits_mask)
 
