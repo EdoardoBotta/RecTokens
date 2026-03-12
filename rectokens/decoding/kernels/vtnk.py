@@ -6,10 +6,9 @@ import triton
 import triton.language as tl
 
 from rectokens.decoding.schemas.compact_csr_trie import CompactCSRTrie
+from torch.library import triton_op, wrap_triton
 from rectokens.decoding.vntk import vtnk_pytorch
 from rectokens.decoding.kernels.utils import tl_fp32_to_tf32
-from torch.library import triton_op
-from torch.library import wrap_triton
 
 IS_PTX_RNA_TF32_SUPPORTED = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 8
 
@@ -23,53 +22,37 @@ def fused_linear_constrained_node_transition(
     """
     Fused linear projection + constrained node transition.
 
-    Computes corrected_logits = mask(a @ b) without materializing unconstrained logits.
+    Only computes dot products for valid (constrained) tokens — skips all others.
+    Expects b = weight.T as a non-contiguous transposed view so that each column
+    of b (= row of weight) is contiguous in memory.
 
     Returns (next_node, valid_idxs, corrected_logits):
       next_node:        (B, max_branches) int64 — child BFS IDs, -1 for padding
       valid_idxs:       (B, max_branches) int64 — valid token indices, -1 for padding
-      corrected_logits: (B, N) float32 — (a @ b) zeroed for invalid tokens
+      corrected_logits: (B, N) float32 — logits for valid tokens, -inf elsewhere
     """
     max_branches = constraint_transitions.layer_max_branches[step]
-    return _fused_linear_constrained_node_transition_op(
-        a,
-        b,
-        cur_node,
-        constraint_transitions.row_ptrs,
-        constraint_transitions.stacked_cols_vals,
-        max_branches,
-    )
-
-
-@triton_op("vtnk::_fused_linear_constrained_node_transition_op", mutates_args={})
-def _fused_linear_constrained_node_transition_op(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    cur_node: torch.Tensor,
-    csr_row_ptrs: torch.Tensor,
-    csr_cols_vals: torch.Tensor,
-    max_branches: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, K = a.shape
     N = b.shape[1]
 
     assert cur_node.shape == (B,), f"Expected cur_node shape (B,), got {cur_node.shape}"
 
     a = a.contiguous()
-    b = b.contiguous()
+    # Do NOT call b.contiguous(): keep the transposed view (b_stride_K=1, b_stride_N=K)
+    # so that each column of b (= row of weight) is contiguous in memory.
     cur_node = cur_node.contiguous()
-    csr_cols_vals = csr_cols_vals.contiguous()
+    csr_cols_vals = constraint_transitions.stacked_cols_vals.contiguous()
 
-    corrected_logits = torch.empty(B, N, dtype=torch.float32, device=a.device)
-    next_node = cur_node.new_empty(B, max_branches)
-    valid_idxs = cur_node.new_empty(B, max_branches)
+    corrected_logits = torch.full((B, N), float('-inf'), dtype=torch.float32, device=a.device)
+    next_node = cur_node.new_full((B, max_branches), -1)
+    valid_idxs = cur_node.new_full((B, max_branches), -1)
 
-    grid = lambda meta: (triton.cdiv(B, meta["BLOCK_B"]) * triton.cdiv(N, meta["BLOCK_N"]),)
-    wrap_triton(_fused_linear_constrained_node_transition_kernel)[grid](
+    grid = lambda meta: (triton.cdiv(B, meta["BLOCK_B"]),)
+    _fused_sparse_linear_constrained_node_transition_kernel[grid](
         a_ptr=a,
         b_ptr=b,
         cur_node_ptr=cur_node,
-        csr_trie_row_ptr=csr_row_ptrs,
+        csr_trie_row_ptr=constraint_transitions.row_ptrs,
         csr_trie_cols_vals_ptr=csr_cols_vals,
         a_stride_B=a.stride(0),
         a_stride_K=a.stride(1),
@@ -86,14 +69,8 @@ def _fused_linear_constrained_node_transition_op(
         valid_idxs_stride_B=valid_idxs.stride(0),
         valid_idxs_stride_N=valid_idxs.stride(1),
         B=B,
-        N=N,
         K=K,
-        BLOCK_B=64,
-        BLOCK_N=64,
-        BLOCK_K=32,
-        GROUP_SIZE_M=4,
         max_branches=max_branches,
-        FP32_TO_TF32_MAX_PRECISION=IS_PTX_RNA_TF32_SUPPORTED,
     )
 
     return next_node, valid_idxs, corrected_logits
@@ -164,15 +141,23 @@ def _constrained_node_transition_op(
         valid_idxs_stride_N=valid_idxs.stride(1),
         B=B,
         N=N,
-        BLOCK_B=64,
-        BLOCK_N=64,
-        GROUP_SIZE_M=4,
         max_branches=max_branches,
     )
 
     return next_node, valid_idxs, corrected_logits
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_B": 32,  "BLOCK_N": 128, "GROUP_SIZE_M": 4}),
+        triton.Config({"BLOCK_B": 64,  "BLOCK_N": 64,  "GROUP_SIZE_M": 4}),
+        triton.Config({"BLOCK_B": 64,  "BLOCK_N": 128, "GROUP_SIZE_M": 4}),
+        triton.Config({"BLOCK_B": 128, "BLOCK_N": 64,  "GROUP_SIZE_M": 4}),
+        triton.Config({"BLOCK_B": 128, "BLOCK_N": 128, "GROUP_SIZE_M": 8}),
+    ],
+    key=["B", "N", "max_branches"],
+    restore_value=["corrected_logits_ptr", "next_node_ptr", "valid_idxs_ptr"],
+)
 @triton.jit
 def _constrained_node_transition_kernel(
     # Inputs
@@ -249,8 +234,19 @@ def _constrained_node_transition_kernel(
         tl.store(valid_idxs_ptrs, cols, mask=offs_B[:, None] < B)
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_B": 64,  "BLOCK_K": 64}),
+        triton.Config({"BLOCK_B": 128, "BLOCK_K": 64}),
+        triton.Config({"BLOCK_B": 256, "BLOCK_K": 64}),
+        triton.Config({"BLOCK_B": 64,  "BLOCK_K": 128}),
+        triton.Config({"BLOCK_B": 128, "BLOCK_K": 128}),
+    ],
+    key=["B", "K", "max_branches"],
+    restore_value=["corrected_logits_ptr", "next_node_ptr", "valid_idxs_ptr"],
+)
 @triton.jit
-def _fused_linear_constrained_node_transition_kernel(
+def _fused_sparse_linear_constrained_node_transition_kernel(
     # Inputs
     a_ptr, b_ptr,
     cur_node_ptr,
@@ -261,7 +257,7 @@ def _fused_linear_constrained_node_transition_kernel(
     b_stride_K,
     b_stride_N,
     cols_vals_stride_0,
-    # Outputs
+    # Outputs (corrected_logits pre-filled with -inf; kernel only writes valid positions)
     corrected_logits_ptr,
     next_node_ptr,
     valid_idxs_ptr,
@@ -273,73 +269,69 @@ def _fused_linear_constrained_node_transition_kernel(
     valid_idxs_stride_N,
     # Constants
     B: tl.constexpr,
-    N: tl.constexpr,
     K: tl.constexpr,
     BLOCK_B: tl.constexpr,
-    BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
     max_branches: tl.constexpr,
-    FP32_TO_TF32_MAX_PRECISION: tl.constexpr,
 ):
+    """
+    Sparse fused kernel: computes dot products only for the valid (constrained) tokens.
+
+    Grid: ceil(B / BLOCK_B) programs, one per batch tile.
+    For each branch slot k in [0, max_branches):
+      - Gather valid column index col_k[b] from the CSR trie for each batch element.
+      - Compute dot(a[b, :], weight[col_k[b], :]) via K-loop with element-wise multiply+sum.
+        (b = weight.T with b_stride_K=1, b_stride_N=K, so weight[col, :] is contiguous.)
+      - Scatter the result to corrected_logits[b, col_k[b]].
+    Invalid branch slots (k >= n_children) are skipped via masking.
+    """
     pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(B, BLOCK_B)
-    num_pid_n = tl.cdiv(N, BLOCK_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_B = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-    pid_N = (pid % num_pid_in_group) // group_size_m
+    offs_B = pid * BLOCK_B + tl.arange(0, BLOCK_B)
+    b_mask = offs_B < B
 
-    offs_B = pid_B * BLOCK_B + tl.arange(0, BLOCK_B)
-    offs_N = pid_N * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs_K = tl.arange(0, BLOCK_K)
-
-    cur_node_ptrs = cur_node_ptr + offs_B
-    a_ptrs = a_ptr + offs_B[:, None] * a_stride_B + offs_K[None, :] * a_stride_K
-    b_ptrs = b_ptr + offs_K[:, None] * b_stride_K + offs_N[None, :] * b_stride_N
-    
-    logits = tl.zeros((BLOCK_B, BLOCK_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_K)):
-        a = tl.load(a_ptrs, mask=(offs_B[:, None] < B) & (offs_K[None, :] < K - k * BLOCK_K), other=0.0)
-        b = tl.load(b_ptrs, mask=(offs_K[:, None] < K - k * BLOCK_K) & (offs_N[None, :] < N), other=0.0)
-
-        if FP32_TO_TF32_MAX_PRECISION:
-            a = tl_fp32_to_tf32(a)
-            b = tl_fp32_to_tf32(b)
-        logits = tl.dot(a, b, logits)
-
-        a_ptrs += BLOCK_K * a_stride_K
-        b_ptrs += BLOCK_K * b_stride_K
-
-    logits_mask = (offs_B[:, None] < B) & (offs_N[None, :] < N)
-
-    cur_node = tl.load(cur_node_ptrs, mask=offs_B < B, other=-1)
+    cur_node = tl.load(cur_node_ptr + offs_B, mask=b_mask, other=-1)
     csr_row_ptrs = tl.load(csr_trie_row_ptr + cur_node, mask=cur_node >= 0, other=0)
     csr_next_ptrs = tl.load(csr_trie_row_ptr + cur_node + 1, mask=cur_node >= 0, other=0)
     n_children = csr_next_ptrs - csr_row_ptrs
 
-    b_valid = offs_B < B
-    logits_correction_mask = tl.zeros([BLOCK_B, BLOCK_N], dtype=tl.int1)
-    for k in tl.static_range(max_branches):
+    for branch_idx in tl.static_range(max_branches):
+        child_mask = b_mask & (n_children > branch_idx)
+
         col_k = tl.load(
-            csr_trie_cols_vals_ptr + csr_row_ptrs + k,
-            mask=b_valid & (n_children > k),
+            csr_trie_cols_vals_ptr + csr_row_ptrs + branch_idx,
+            mask=child_mask,
             other=-1,
         )
-        logits_correction_mask = logits_correction_mask | (col_k[:, None] == offs_N[None, :])
-    corrected_logits = tl.where(logits_correction_mask, logits, float('-inf'))
-    tl.store(corrected_logits_ptr + offs_B[:, None] * corrected_logits_stride_B + offs_N[None, :] * corrected_logits_stride_N, corrected_logits, mask=logits_mask)
+        val_k = tl.load(
+            csr_trie_cols_vals_ptr + csr_row_ptrs + branch_idx + cols_vals_stride_0,
+            mask=child_mask,
+            other=-1,
+        )
 
-    if pid_N == 0:
-        slice_range = tl.arange(0, max_branches)
-        offs_cols_vals = csr_row_ptrs[:, None] + slice_range
-        children_mask = n_children[:, None] > slice_range[None, :]
-        cols = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals, mask=children_mask, other=-1)
-        next_node_vals = tl.load(csr_trie_cols_vals_ptr + offs_cols_vals + cols_vals_stride_0, mask=children_mask, other=-1)
-        next_node_ptrs = next_node_ptr + offs_B[:, None] * next_node_stride_B + tl.arange(0, max_branches) * next_node_stride_N
-        valid_idxs_ptrs = valid_idxs_ptr + offs_B[:, None] * valid_idxs_stride_B + tl.arange(0, max_branches) * valid_idxs_stride_N
-        tl.store(next_node_ptrs, next_node_vals, mask=offs_B[:, None] < B)
-        tl.store(valid_idxs_ptrs, cols, mask=offs_B[:, None] < B)
+        # Compute dot(a[b], weight[col_k[b], :]) for each batch element.
+        # b = weight.T (non-contiguous view): b_stride_K=1, b_stride_N=K
+        # => b_ptr + col_k[b_i] * K + offs_K is weight[col_k[b_i], offs_K]: contiguous per row.
+        logit_k = tl.zeros((BLOCK_B,), dtype=tl.float32)
+        for k_tile in range(0, tl.cdiv(K, BLOCK_K)):
+            offs_K = k_tile * BLOCK_K + tl.arange(0, BLOCK_K)
+            k_mask = offs_K < K
+
+            a_ptrs = a_ptr + offs_B[:, None] * a_stride_B + offs_K[None, :] * a_stride_K
+            a_chunk = tl.load(a_ptrs, mask=b_mask[:, None] & k_mask[None, :], other=0.0)
+
+            # Gather weight[col_k[b_i], offs_K] for each batch element b_i.
+            b_ptrs = b_ptr + offs_K[None, :] * b_stride_K + col_k[:, None] * b_stride_N
+            b_chunk = tl.load(b_ptrs, mask=child_mask[:, None] & k_mask[None, :], other=0.0)
+
+            logit_k += tl.sum(a_chunk * b_chunk, axis=1)
+
+        # Scatter valid logits; corrected_logits was pre-filled with -inf.
+        out_ptrs = corrected_logits_ptr + offs_B * corrected_logits_stride_B + col_k * corrected_logits_stride_N
+        tl.store(out_ptrs, logit_k, mask=child_mask)
+
+        # Store next_node and valid_idxs for this branch slot.
+        next_node_ptrs = next_node_ptr + offs_B * next_node_stride_B + branch_idx * next_node_stride_N
+        valid_idxs_ptrs = valid_idxs_ptr + offs_B * valid_idxs_stride_B + branch_idx * valid_idxs_stride_N
+        tl.store(next_node_ptrs, val_k, mask=b_mask)
+        tl.store(valid_idxs_ptrs, col_k, mask=b_mask)
 

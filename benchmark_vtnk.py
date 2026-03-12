@@ -2,6 +2,7 @@
 Benchmark: fused_linear_constrained_node_transition
     vs torch.compile(nn.Linear) + constrained_node_transition (Triton kernel)
     vs torch.compile(nn.Linear) + vtnk_pytorch
+    vs torch.compile(sparse_linear_pytorch)
 
 Grid: B (batch size) × N (vocab / logits size). K (hidden dim) fixed.
 """
@@ -15,7 +16,7 @@ import seaborn as sns
 import pandas as pd
 
 from rectokens.decoding.csr import csr_from_sorted_batch
-from rectokens.decoding.vntk import vtnk_pytorch
+from rectokens.decoding.vntk import vtnk_pytorch, sparse_linear_pytorch
 from rectokens.decoding.kernels.vtnk import (
     constrained_node_transition,
     fused_linear_constrained_node_transition,
@@ -66,6 +67,8 @@ def benchmark_grid(B_vals, N_vals):
             with torch.no_grad():
                 linear.weight.data.copy_(weight)
 
+            sparse_linear_pytorch_compiled = torch.compile(sparse_linear_pytorch)
+
             # --- warmup / force compilation ---
             with torch.no_grad():
                 fused_linear_constrained_node_transition(a, weight.T, cur_node, csr, step=0)
@@ -73,6 +76,7 @@ def benchmark_grid(B_vals, N_vals):
                 constrained_node_transition(logits_w, cur_node, csr, step=0, vocab_size=N)
                 vtnk_pytorch(logits_w, cur_node, csr, step=0)
                 linear(a)
+                sparse_linear_pytorch_compiled(a, weight, cur_node, csr, step=0)
 
             # --- benchmark ---
             with torch.no_grad():
@@ -85,6 +89,9 @@ def benchmark_grid(B_vals, N_vals):
                 ms_pytorch = run_bench(lambda: (
                     vtnk_pytorch(linear(a), cur_node, csr, step=0)
                 ))
+                ms_sparse_pytorch = run_bench(lambda: (
+                    sparse_linear_pytorch_compiled(a, weight, cur_node, csr, step=0)
+                ))
 
             records.append({
                 "B": B,
@@ -92,8 +99,10 @@ def benchmark_grid(B_vals, N_vals):
                 "ms_fused": ms_fused,
                 "ms_kernel": ms_kernel,
                 "ms_pytorch": ms_pytorch,
+                "ms_sparse_pytorch": ms_sparse_pytorch,
                 "speedup_fused_vs_kernel": ms_kernel / ms_fused,
                 "speedup_fused_vs_pytorch": ms_pytorch / ms_fused,
+                "speedup_fused_vs_sparse_pytorch": ms_sparse_pytorch / ms_fused,
             })
 
     return pd.DataFrame(records)
@@ -122,8 +131,8 @@ if __name__ == "__main__":
     assert torch.cuda.is_available(), "CUDA required"
     os.makedirs("out", exist_ok=True)
 
-    B_vals = [64, 256, 1024, 4096, 8192]
-    N_vals = [512, 1024, 4096, 8192, 32000]
+    B_vals = [32, 256, 1024]
+    N_vals = [512, 1024, 8192, 150000]
 
     print(f"Benchmarking K={K}, max_branches={MAX_BRANCHES}")
     print(f"B_vals={B_vals}")
@@ -134,8 +143,9 @@ if __name__ == "__main__":
     df.to_csv(csv_path, index=False)
     print(f"\nSaved {csv_path}\n")
 
-    print(df[["B", "N", "ms_fused", "ms_kernel", "ms_pytorch",
-              "speedup_fused_vs_kernel", "speedup_fused_vs_pytorch"]].to_string(index=False))
+    print(df[["B", "N", "ms_fused", "ms_kernel", "ms_pytorch", "ms_sparse_pytorch",
+              "speedup_fused_vs_kernel", "speedup_fused_vs_pytorch",
+              "speedup_fused_vs_sparse_pytorch"]].to_string(index=False))
 
     plot_heatmap(
         df,
@@ -149,5 +159,12 @@ if __name__ == "__main__":
         value_col="speedup_fused_vs_pytorch",
         title=f"Fused speedup vs compiled_linear+vtnk_pytorch  (K={K})",
         filename="out/heatmap_fused_vs_pytorch.jpg",
+        cbar_label="Speedup (>1 = fused faster)",
+    )
+    plot_heatmap(
+        df,
+        value_col="speedup_fused_vs_sparse_pytorch",
+        title=f"Fused speedup vs sparse_linear_pytorch  (K={K})",
+        filename="out/heatmap_fused_vs_sparse_pytorch.jpg",
         cbar_label="Speedup (>1 = fused faster)",
     )

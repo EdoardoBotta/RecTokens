@@ -53,6 +53,7 @@ def csr_from_sorted_batch(sem_ids: torch.Tensor, vocab_size: int, dense_lookup_l
     Expects sem_ids to be a 2D tensor with rows lexicographically sorted.
     """
     N, L = sem_ids.shape
+    dense_lookup_layers = min(dense_lookup_layers, L)
     device = sem_ids.device
 
     sem_ids_aug = torch.cat([torch.full_like(sem_ids[:1], -1), sem_ids], dim=0)
