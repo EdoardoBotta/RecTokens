@@ -70,6 +70,7 @@ def fused_linear_constrained_node_transition(
         valid_idxs_stride_N=valid_idxs.stride(1),
         B=B,
         K=K,
+        N=N,
         max_branches=max_branches,
     )
 
@@ -242,7 +243,7 @@ def _constrained_node_transition_kernel(
         triton.Config({"BLOCK_B": 64,  "BLOCK_K": 128}),
         triton.Config({"BLOCK_B": 128, "BLOCK_K": 128}),
     ],
-    key=["B", "K", "max_branches"],
+    key=["B", "K", "N", "max_branches"],
     restore_value=["corrected_logits_ptr", "next_node_ptr", "valid_idxs_ptr"],
 )
 @triton.jit
@@ -270,6 +271,7 @@ def _fused_sparse_linear_constrained_node_transition_kernel(
     # Constants
     B: tl.constexpr,
     K: tl.constexpr,
+    N: tl.constexpr,
     BLOCK_B: tl.constexpr,
     BLOCK_K: tl.constexpr,
     max_branches: tl.constexpr,
