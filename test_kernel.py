@@ -71,7 +71,7 @@ def main() -> None:
     csr = csr._replace(
         row_ptrs=csr.row_ptrs.to(device),
         stacked_cols_vals=csr.stacked_cols_vals.to(device),
-        dense_lookup_mask=csr.dense_lookup_mask.to(device),
+        dense_mask_by_layer=[v.to(device) for v in csr.dense_mask_by_layer],
         dense_states=csr.dense_states.to(device),
     )
 
@@ -109,7 +109,7 @@ def main() -> None:
     csr2 = csr2._replace(
         row_ptrs=csr2.row_ptrs.to(device),
         stacked_cols_vals=csr2.stacked_cols_vals.to(device),
-        dense_lookup_mask=csr2.dense_lookup_mask.to(device),
+        dense_mask_by_layer=[v.to(device) for v in csr2.dense_mask_by_layer],
         dense_states=csr2.dense_states.to(device),
     )
     B7 = 32

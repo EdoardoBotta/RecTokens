@@ -39,7 +39,7 @@ def make_csr(vocab_size: int, max_branches: int) -> object:
     return csr._replace(
         row_ptrs=csr.row_ptrs.to(DEVICE),
         stacked_cols_vals=csr.stacked_cols_vals.to(DEVICE),
-        dense_lookup_mask=csr.dense_lookup_mask.to(DEVICE),
+        dense_mask_by_layer=[v.to(DEVICE) for v in csr.dense_mask_by_layer],
         dense_states=csr.dense_states.to(DEVICE),
     )
 

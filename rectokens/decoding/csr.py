@@ -40,11 +40,18 @@ def csr_from_trie(trie: Trie, vocab_size: int, dense_lookup_layers: int = 2) -> 
         for d in range(max(max_children_at_depth, default=-1) + 1)
     ]
 
+    mask = dense_lookup_mask
+    dense_mask_by_layer = []
+    for _ in range(dense_lookup_layers - 1, -1, -1):
+        dense_mask_by_layer.append(mask)
+        mask = mask.any(dim=-1)
+    dense_mask_by_layer.reverse()
+
     return CompactCSRTrie(
         row_ptrs=torch.tensor(row_ptrs),
         stacked_cols_vals=torch.stack([torch.tensor(col_idxs), torch.tensor(values)]),
         layer_max_branches=layer_max_branches,
-        dense_lookup_mask=dense_lookup_mask,
+        dense_mask_by_layer=dense_mask_by_layer,
         dense_states=dense_states,
     )
 
@@ -94,11 +101,17 @@ def csr_from_sorted_batch(sem_ids: torch.Tensor, vocab_size: int, dense_lookup_l
     dense_states = torch.zeros([vocab_size] * dense_lookup_layers, dtype=torch.long, device=device)
     dense_states[sem_ids[:, :dense_lookup_layers].unbind(-1)] = node_ids[dense_lookup_layers - 1]
 
+    dense_mask_by_layer = []
+    for _ in range(dense_lookup_layers-1, -1, -1):
+        dense_mask_by_layer.append(mask)
+        mask = mask.any(dim=-1)
+    dense_mask_by_layer.reverse()
+    
     return CompactCSRTrie(
         row_ptrs=rows,
         stacked_cols_vals=torch.stack([cols, vals]),
         layer_max_branches=layer_max_branches,
-        dense_lookup_mask=mask,
+        dense_mask_by_layer=dense_mask_by_layer,
         dense_states=dense_states,
     )
 

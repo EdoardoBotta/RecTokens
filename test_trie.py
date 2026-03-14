@@ -284,7 +284,7 @@ def test_csr_sorted_batch() -> None:
     print("\n--- sorted_batch vs trie: [42] ---")
     t1 = Trie(); t1.insert([42])
     b1 = csr_from_sorted_batch(lex_sort([[42]]), vocab_size=50, dense_lookup_layers=1)
-    assert b1.dense_lookup_mask.shape == (50,) and b1.dense_lookup_mask[42]
+    assert b1.dense_mask_by_layer[0].shape == (50,) and b1.dense_mask_by_layer[0][42]
     assert_same_edges(csr_from_trie(t1, vocab_size=50, dense_lookup_layers=1), b1, "[42]")
     assert children_of_batch(b1, 0) == {42: 1}
     assert children_of_batch(b1, 1) == {}
@@ -305,7 +305,7 @@ def test_csr_sorted_batch() -> None:
     assert children_of_batch(b2, 2) == {3: 3}
     assert children_of_batch(b2, 3) == {}
     # default dense_lookup_layers=2: mask shape (8,8), indexed by (tok0, tok1)
-    assert b2.dense_lookup_mask.shape == (8, 8) and b2.dense_lookup_mask[1, 2] and b2.dense_lookup_mask.sum() == 1
+    assert b2.dense_mask_by_layer[1].shape == (8, 8) and b2.dense_mask_by_layer[1][1, 2] and b2.dense_mask_by_layer[1].sum() == 1
     assert b2.dense_states.shape == (8, 8)
     # dense_states[1, 2] == BFS node ID reached after tokens (1, 2) == 2
     assert b2.dense_states[1, 2] == children_of_batch(b2, children_of_batch(b2, 0)[1])[2]
@@ -324,7 +324,7 @@ def test_csr_sorted_batch() -> None:
     assert children_of_batch(b3, 3) == {}
     assert children_of_batch(b3, 4) == {}
     # Both sequences share prefix (1,2), so only one cell is set
-    assert b3.dense_lookup_mask.shape == (8, 8) and b3.dense_lookup_mask[1, 2] and b3.dense_lookup_mask.sum() == 1
+    assert b3.dense_mask_by_layer[1].shape == (8, 8) and b3.dense_mask_by_layer[1][1, 2] and b3.dense_mask_by_layer[1].sum() == 1
     assert b3.dense_states.shape == (8, 8)
     assert b3.dense_states[1, 2] == children_of_batch(b3, children_of_batch(b3, 0)[1])[2]
     print("  ✓")
@@ -355,7 +355,7 @@ def test_csr_sorted_batch() -> None:
             bfs_row = ch[token]
         print(f"  walk {target} → terminal BFS row {bfs_row}  ✓")
     # Prefixes: (1,2) and (3,1) are the unique 2-token starts
-    assert b4.dense_lookup_mask.shape == (8, 8) and b4.dense_lookup_mask[1, 2] and b4.dense_lookup_mask[3, 1] and b4.dense_lookup_mask.sum() == 2
+    assert b4.dense_mask_by_layer[1].shape == (8, 8) and b4.dense_mask_by_layer[1][1, 2] and b4.dense_mask_by_layer[1][3, 1] and b4.dense_mask_by_layer[1].sum() == 2
     assert b4.dense_states.shape == (8, 8)
     node_1 = children_of_batch(b4, 0)[1]
     assert b4.dense_states[1, 2] == children_of_batch(b4, node_1)[2]
@@ -377,9 +377,9 @@ def test_csr_sorted_batch() -> None:
     assert 0 in children_of_batch(b5, 0), "token 0 missing from root children"
     assert 2 in children_of_batch(b5, 0), "token 2 missing from root children"
     # dense mask: prefixes (0,1), (0,3), (2,0) must be set; nothing else
-    assert b5.dense_lookup_mask.shape == (4, 4)
-    assert b5.dense_lookup_mask[0, 1] and b5.dense_lookup_mask[0, 3] and b5.dense_lookup_mask[2, 0]
-    assert b5.dense_lookup_mask.sum() == 3
+    assert b5.dense_mask_by_layer[1].shape == (4, 4)
+    assert b5.dense_mask_by_layer[1][0, 1] and b5.dense_mask_by_layer[1][0, 3] and b5.dense_mask_by_layer[1][2, 0]
+    assert b5.dense_mask_by_layer[1].sum() == 3
     assert b5.dense_states.shape == (4, 4)
     node_0 = children_of_batch(b5, 0)[0]
     assert b5.dense_states[0, 1] == children_of_batch(b5, node_0)[1]
@@ -404,11 +404,11 @@ def test_csr_sorted_batch() -> None:
     trie_rand = build_trie(ids_sorted)
     csr_t = csr_from_trie(trie_rand, vocab_size=8)
     csr_b = csr_from_sorted_batch(ids_sorted, vocab_size=8)
-    assert csr_b.dense_lookup_mask.dtype == torch.bool
-    assert csr_b.dense_lookup_mask.shape == (8, 8)
-    assert csr_b.dense_lookup_mask.any()
+    assert csr_b.dense_mask_by_layer[1].dtype == torch.bool
+    assert csr_b.dense_mask_by_layer[1].shape == (8, 8)
+    assert csr_b.dense_mask_by_layer[1].any()
     # Every (tok0, tok1) pair in the corpus must be set in the mask
-    assert csr_b.dense_lookup_mask[ids_sorted[:, 0], ids_sorted[:, 1]].all()
+    assert csr_b.dense_mask_by_layer[1][ids_sorted[:, 0], ids_sorted[:, 1]].all()
     # dense_states must be nonzero at every corpus prefix
     assert (csr_b.dense_states[ids_sorted[:, 0], ids_sorted[:, 1]] > 0).all()
     assert_same_edges(csr_t, csr_b, "random batch")
