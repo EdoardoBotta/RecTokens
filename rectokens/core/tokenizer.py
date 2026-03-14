@@ -53,7 +53,7 @@ class TokenSequence:
         if base is None:
             base = int(codes.max().item()) + 1
         multipliers = torch.tensor(
-            [base ** i for i in range(self.num_levels - 1, -1, -1)],
+            [base**i for i in range(self.num_levels - 1, -1, -1)],
             dtype=torch.long,
             device=codes.device,
         )

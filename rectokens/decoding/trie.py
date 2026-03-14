@@ -7,9 +7,10 @@ class TrieNode:
     def __init__(self):
         self.children = {}
         self.is_end_of_token = False
-    
+
     def take_step(self, idx: int) -> Optional[TrieNode]:
         return self.children.get(idx)
+
 
 class Trie:
     def __init__(self):
@@ -30,4 +31,3 @@ class Trie:
                 return None
             node = node.children[idx]
         return node
-

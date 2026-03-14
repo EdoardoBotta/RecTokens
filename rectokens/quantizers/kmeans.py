@@ -88,7 +88,9 @@ class KMeansQuantizer(Quantizer):
             generator = torch.Generator(device=device).manual_seed(self._seed)
             centroids = self._kmeans_plus_plus_init(batch, actual_k, generator)
             if actual_k < k:
-                extra_idx = torch.randint(n, (k - actual_k,), generator=generator, device=device)
+                extra_idx = torch.randint(
+                    n, (k - actual_k,), generator=generator, device=device
+                )
                 centroids = torch.cat([centroids, batch[extra_idx]])
             self._codebook.update(torch.arange(k, device=device), centroids)
             self._counts = torch.zeros(k, dtype=torch.long, device=device)
@@ -137,18 +139,26 @@ class KMeansQuantizer(Quantizer):
     ) -> torch.Tensor:
         """K-means++ centroid seeding on ``data``."""
         n = len(data)
-        first_idx = int(torch.randint(n, (1,), generator=generator, device=data.device).item())
+        first_idx = int(
+            torch.randint(n, (1,), generator=generator, device=data.device).item()
+        )
         centroids = [data[first_idx]]
 
         for _ in range(k - 1):
-            stacked = torch.stack(centroids)                          # (c, D)
+            stacked = torch.stack(centroids)  # (c, D)
             dists = torch.cdist(data, stacked).min(dim=1).values ** 2  # (N,)
             total = dists.sum()
             if total == 0:
                 # All points coincide with existing centroids; pick uniformly
-                idx = int(torch.randint(n, (1,), generator=generator, device=data.device).item())
+                idx = int(
+                    torch.randint(
+                        n, (1,), generator=generator, device=data.device
+                    ).item()
+                )
             else:
-                idx = int(torch.multinomial(dists / total, 1, generator=generator).item())
+                idx = int(
+                    torch.multinomial(dists / total, 1, generator=generator).item()
+                )
             centroids.append(data[idx])
 
         return torch.stack(centroids)

@@ -59,7 +59,9 @@ def benchmark_grid(B_vals, N_vals):
 
             # Inputs
             a = torch.randn(B, K, device=DEVICE)
-            weight = torch.randn(N, K, device=DEVICE)  # nn.Linear weight shape (out, in)
+            weight = torch.randn(
+                N, K, device=DEVICE
+            )  # nn.Linear weight shape (out, in)
             cur_node = torch.zeros(B, dtype=torch.long, device=DEVICE)
 
             # compiled linear (shared across fn2 and fn3)
@@ -71,9 +73,13 @@ def benchmark_grid(B_vals, N_vals):
 
             # --- warmup / force compilation ---
             with torch.no_grad():
-                fused_linear_constrained_node_transition(a, weight.T, cur_node, csr, step=0)
+                fused_linear_constrained_node_transition(
+                    a, weight.T, cur_node, csr, step=0
+                )
                 logits_w = a @ weight.T
-                constrained_node_transition(logits_w, cur_node, csr, step=0, vocab_size=N)
+                constrained_node_transition(
+                    logits_w, cur_node, csr, step=0, vocab_size=N
+                )
                 vtnk_pytorch(logits_w, cur_node, csr, step=0)
                 linear(a)
                 sparse_linear_pytorch_compiled(a, weight, cur_node, csr, step=0)
@@ -81,34 +87,44 @@ def benchmark_grid(B_vals, N_vals):
             # --- benchmark ---
             with torch.no_grad():
                 ms_fused = run_bench(
-                    lambda: fused_linear_constrained_node_transition(a, weight.T, cur_node, csr, step=0)
+                    lambda: fused_linear_constrained_node_transition(
+                        a, weight.T, cur_node, csr, step=0
+                    )
                 )
-                ms_kernel = run_bench(lambda: (
-                    constrained_node_transition(a @ weight.T, cur_node, csr, step=0, vocab_size=N)
-                ))
-                ms_pytorch = run_bench(lambda: (
-                    vtnk_pytorch(linear(a), cur_node, csr, step=0)
-                ))
-                ms_sparse_pytorch = run_bench(lambda: (
-                    sparse_linear_pytorch_compiled(a, weight, cur_node, csr, step=0)
-                ))
+                ms_kernel = run_bench(
+                    lambda: constrained_node_transition(
+                        a @ weight.T, cur_node, csr, step=0, vocab_size=N
+                    )
+                )
+                ms_pytorch = run_bench(
+                    lambda: vtnk_pytorch(linear(a), cur_node, csr, step=0)
+                )
+                ms_sparse_pytorch = run_bench(
+                    lambda: sparse_linear_pytorch_compiled(
+                        a, weight, cur_node, csr, step=0
+                    )
+                )
 
-            records.append({
-                "B": B,
-                "N": N,
-                "ms_fused": ms_fused,
-                "ms_kernel": ms_kernel,
-                "ms_pytorch": ms_pytorch,
-                "ms_sparse_pytorch": ms_sparse_pytorch,
-                "speedup_fused_vs_kernel": ms_kernel / ms_fused,
-                "speedup_fused_vs_pytorch": ms_pytorch / ms_fused,
-                "speedup_fused_vs_sparse_pytorch": ms_sparse_pytorch / ms_fused,
-            })
+            records.append(
+                {
+                    "B": B,
+                    "N": N,
+                    "ms_fused": ms_fused,
+                    "ms_kernel": ms_kernel,
+                    "ms_pytorch": ms_pytorch,
+                    "ms_sparse_pytorch": ms_sparse_pytorch,
+                    "speedup_fused_vs_kernel": ms_kernel / ms_fused,
+                    "speedup_fused_vs_pytorch": ms_pytorch / ms_fused,
+                    "speedup_fused_vs_sparse_pytorch": ms_sparse_pytorch / ms_fused,
+                }
+            )
 
     return pd.DataFrame(records)
 
 
-def plot_heatmap(df, value_col, title, filename, fmt=".2f", cbar_label="Speedup vs fused"):
+def plot_heatmap(
+    df, value_col, title, filename, fmt=".2f", cbar_label="Speedup vs fused"
+):
     pivot = df.pivot(index="B", columns="N", values=value_col)
     plt.figure(figsize=(10, 6))
     sns.heatmap(
@@ -143,9 +159,21 @@ if __name__ == "__main__":
     df.to_csv(csv_path, index=False)
     print(f"\nSaved {csv_path}\n")
 
-    print(df[["B", "N", "ms_fused", "ms_kernel", "ms_pytorch", "ms_sparse_pytorch",
-              "speedup_fused_vs_kernel", "speedup_fused_vs_pytorch",
-              "speedup_fused_vs_sparse_pytorch"]].to_string(index=False))
+    print(
+        df[
+            [
+                "B",
+                "N",
+                "ms_fused",
+                "ms_kernel",
+                "ms_pytorch",
+                "ms_sparse_pytorch",
+                "speedup_fused_vs_kernel",
+                "speedup_fused_vs_pytorch",
+                "speedup_fused_vs_sparse_pytorch",
+            ]
+        ].to_string(index=False)
+    )
 
     plot_heatmap(
         df,

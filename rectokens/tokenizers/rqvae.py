@@ -62,7 +62,9 @@ class VQQuantizer(Quantizer, nn.Module):
     ) -> None:
         # Both Quantizer (ABC) and nn.Module need their __init__ called
         nn.Module.__init__(self)
-        self._codebook = EuclideanCodebook(codebook_size, dim, learnable=learnable_codebook)
+        self._codebook = EuclideanCodebook(
+            codebook_size, dim, learnable=learnable_codebook
+        )
         self.commitment_weight = commitment_weight
         self.ema_decay = ema_decay
         self.restart_after_steps = restart_after_steps
@@ -74,7 +76,9 @@ class VQQuantizer(Quantizer, nn.Module):
         # Persisted in state_dict so save/load preserves whether data-driven init ran
         self.register_buffer("_initialized", torch.zeros(1, dtype=torch.bool))
         # Steps since each code last received an assignment — used for dead-code restart
-        self.register_buffer("_steps_since_active", torch.zeros(codebook_size, dtype=torch.long))
+        self.register_buffer(
+            "_steps_since_active", torch.zeros(codebook_size, dtype=torch.long)
+        )
 
         # Placeholder init — overwritten on the first training batch by _init_from_batch,
         # which seeds entries directly from encoder outputs.
@@ -104,8 +108,8 @@ class VQQuantizer(Quantizer, nn.Module):
             self._init_from_batch(x.detach())
 
         result = self._codebook.find_nearest(x)
-        codes = result.codes                           # (B,)
-        e_k = self._codebook.lookup(codes)             # (B, D)  — no grad
+        codes = result.codes  # (B,)
+        e_k = self._codebook.lookup(codes)  # (B, D)  — no grad
 
         # Straight-through: gradients pass through as if no quantization
         quantized_st = x + (e_k - x).detach()
@@ -117,10 +121,11 @@ class VQQuantizer(Quantizer, nn.Module):
             # gradients.  e_k is an nn.Parameter so F.mse_loss(x.detach(), e_k)
             # pushes the codebook entry toward the encoder output; the commitment
             # term pushes the encoder output toward the (detached) codebook entry.
-            #import pdb; pdb.set_trace()  # noqa: T100
+            # import pdb; pdb.set_trace()  # noqa: T100
             commitment_loss = (
                 F.mse_loss(x.detach(), e_k, reduction="none").sum(dim=-1).mean()
-                + self.commitment_weight * F.mse_loss(x, e_k.detach(), reduction="none").sum(dim=-1).mean()
+                + self.commitment_weight
+                * F.mse_loss(x, e_k.detach(), reduction="none").sum(dim=-1).mean()
             )
         else:
             # EMA mode: codebook updated externally; only encoder commitment term.
@@ -155,8 +160,8 @@ class VQQuantizer(Quantizer, nn.Module):
         centroids = [x[first]]
 
         for _ in range(actual_k - 1):
-            stacked = torch.stack(centroids)                                # (c, D)
-            dists = torch.cdist(x, stacked).min(dim=1).values ** 2         # (N,)
+            stacked = torch.stack(centroids)  # (c, D)
+            dists = torch.cdist(x, stacked).min(dim=1).values ** 2  # (N,)
             total = dists.sum()
             if total == 0:
                 idx = int(torch.randint(n, (1,), device=x.device).item())
@@ -164,7 +169,7 @@ class VQQuantizer(Quantizer, nn.Module):
                 idx = int(torch.multinomial(dists / total, 1).item())
             centroids.append(x[idx])
 
-        init = torch.stack(centroids)                                       # (actual_k, D)
+        init = torch.stack(centroids)  # (actual_k, D)
         if actual_k < k:
             # Batch smaller than codebook: fill remaining with random repeats
             extra = torch.randint(n, (k - actual_k,), device=x.device)
@@ -197,8 +202,8 @@ class VQQuantizer(Quantizer, nn.Module):
         """
         k = self._codebook.size
         one_hot = F.one_hot(codes, num_classes=k).float()  # (B, K)
-        cluster_size = one_hot.sum(dim=0)                  # (K,)
-        embed_sum = one_hot.t() @ x                        # (K, D)
+        cluster_size = one_hot.sum(dim=0)  # (K,)
+        embed_sum = one_hot.t() @ x  # (K, D)
 
         active = cluster_size > 0
         if active.any():
@@ -257,7 +262,9 @@ class MLP(nn.Module):
         num_layers: Total number of linear layers (≥2).
     """
 
-    def __init__(self, in_dim: int, hidden_dim: int, out_dim: int, num_layers: int = 3) -> None:
+    def __init__(
+        self, in_dim: int, hidden_dim: int, out_dim: int, num_layers: int = 3
+    ) -> None:
         super().__init__()
         layers: list[nn.Module] = [nn.Linear(in_dim, hidden_dim), nn.ReLU()]
         for _ in range(num_layers - 2):
@@ -381,7 +388,7 @@ class RQVAETokenizer(nn.Module, Tokenizer):
         recon = self.decoder(rq_out.quantized)
 
         with torch.no_grad():
-            codes = rq_out.codes                                     # (B, L)
+            codes = rq_out.codes  # (B, L)
             # Pairwise full-tuple equality: (B, B)
             eq = (codes.unsqueeze(0) == codes.unsqueeze(1)).all(dim=-1)
             # Row i is True when no later row j (j > i) shares the same tuple,
@@ -465,7 +472,9 @@ class RQVAETokenizer(nn.Module, Tokenizer):
         if single:
             codes = codes.unsqueeze(0)
 
-        latent = torch.zeros(len(codes), self.latent_dim, dtype=torch.float32, device=codes.device)
+        latent = torch.zeros(
+            len(codes), self.latent_dim, dtype=torch.float32, device=codes.device
+        )
         for level_idx, quantizer in enumerate(self.rq.levels):
             level_codes = codes[:, level_idx]
             latent = latent + quantizer.codebook.lookup(level_codes)

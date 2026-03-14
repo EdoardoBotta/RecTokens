@@ -11,7 +11,7 @@ import torch.nn as nn
 class SearchResult:
     """Nearest-neighbor search result from a codebook query."""
 
-    codes: torch.Tensor      # (B,) long — index of nearest code per query
+    codes: torch.Tensor  # (B,) long — index of nearest code per query
 
 
 class Codebook(nn.Module):

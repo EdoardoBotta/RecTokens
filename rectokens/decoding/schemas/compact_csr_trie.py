@@ -7,4 +7,4 @@ class CompactCSRTrie(NamedTuple):
     stacked_cols_vals: Tensor
     layer_max_branches: list[int]
     dense_mask_by_layer: list[Tensor]
-    dense_states: Tensor 
+    dense_states: Tensor

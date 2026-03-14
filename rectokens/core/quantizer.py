@@ -12,9 +12,9 @@ from .codebook import Codebook
 class QuantizerOutput:
     """Output of a single-level quantizer."""
 
-    codes: torch.Tensor             # (B,) long — discrete code indices
-    quantized: torch.Tensor         # (B, D) float — selected codebook entries
-    residuals: torch.Tensor         # (B, D) float — input minus quantized
+    codes: torch.Tensor  # (B,) long — discrete code indices
+    quantized: torch.Tensor  # (B, D) float — selected codebook entries
+    residuals: torch.Tensor  # (B, D) float — input minus quantized
     commitment_loss: torch.Tensor | None = None  # scalar; set during VQ training
 
 
@@ -22,14 +22,18 @@ class QuantizerOutput:
 class ResidualQuantizerOutput:
     """Output of a multi-level residual quantizer."""
 
-    codes: torch.Tensor                      # (B, num_levels) long
-    quantized: torch.Tensor                  # (B, D) float — sum of all levels
+    codes: torch.Tensor  # (B, num_levels) long
+    quantized: torch.Tensor  # (B, D) float — sum of all levels
     level_outputs: list[QuantizerOutput] = field(default_factory=list)
 
     @property
     def commitment_loss(self) -> torch.Tensor:
         """Sum of commitment losses across all levels (0 if none set)."""
-        losses = [o.commitment_loss for o in self.level_outputs if o.commitment_loss is not None]
+        losses = [
+            o.commitment_loss
+            for o in self.level_outputs
+            if o.commitment_loss is not None
+        ]
         if not losses:
             return torch.tensor(0.0)
         return torch.stack(losses).sum()

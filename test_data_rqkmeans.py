@@ -49,7 +49,9 @@ def train_rqkmeans(
     )
 
     train_sampler = BatchSampler(RandomSampler(dataset), batch_size, False)
-    loader = DataLoader(dataset, sampler=train_sampler, batch_size=None, collate_fn=lambda batch: batch)
+    loader = DataLoader(
+        dataset, sampler=train_sampler, batch_size=None, collate_fn=lambda batch: batch
+    )
 
     for epoch in range(1, num_epochs + 1):
         total_recon = 0.0

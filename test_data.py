@@ -78,8 +78,9 @@ def train_rqvae(
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     train_sampler = BatchSampler(RandomSampler(dataset), batch_size, False)
-    loader = DataLoader(dataset, sampler=train_sampler, batch_size=None, collate_fn=lambda batch: batch)
-    
+    loader = DataLoader(
+        dataset, sampler=train_sampler, batch_size=None, collate_fn=lambda batch: batch
+    )
 
     model.train()
     for epoch in range(1, num_epochs + 1):
@@ -92,7 +93,9 @@ def train_rqvae(
             optimizer.zero_grad()
 
             out = model(x)
-            recon_loss = F.mse_loss(out["recon"], x, reduction="none").sum(dim=-1).mean()
+            recon_loss = (
+                F.mse_loss(out["recon"], x, reduction="none").sum(dim=-1).mean()
+            )
             commit_loss = out["commitment_loss"]
             (recon_loss + commit_loss).backward()
             optimizer.step()

@@ -99,7 +99,11 @@ class EuclideanCodebook(Codebook):
         # Cast to the codebook dtype — MPS requires both operands of matmul
         # to share the same dtype as the accumulator.
         query = query.to(self.embeddings.dtype)
-        codes = nearest_neighbor_quantize(query, self.embeddings) if IS_GPU_AVAILABLE else torch.cdist(query, self.embeddings).min(-1)[1]
+        codes = (
+            nearest_neighbor_quantize(query, self.embeddings)
+            if IS_GPU_AVAILABLE
+            else torch.cdist(query, self.embeddings).min(-1)[1]
+        )
         return SearchResult(codes=codes)
 
     def update(self, codes: torch.Tensor, embeddings: torch.Tensor) -> None:

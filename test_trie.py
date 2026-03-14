@@ -10,7 +10,9 @@ from rectokens.decoding.trie import Trie
 from rectokens.decoding.csr import CompactCSRTrie
 
 
-def make_semantic_ids(num_items: int, num_levels: int, codebook_size: int, seed: int = 0) -> torch.Tensor:
+def make_semantic_ids(
+    num_items: int, num_levels: int, codebook_size: int, seed: int = 0
+) -> torch.Tensor:
     """Generate a random batch of semantic ID tuples."""
     rng = torch.Generator()
     rng.manual_seed(seed)
@@ -36,7 +38,7 @@ def valid_next_tokens(trie: Trie, prefix: list[int]) -> list[int]:
 def main() -> None:
     NUM_ITEMS = 12
     NUM_LEVELS = 3
-    CODEBOOK_SIZE = 8   # small so collisions are visible
+    CODEBOOK_SIZE = 8  # small so collisions are visible
 
     ids = make_semantic_ids(NUM_ITEMS, NUM_LEVELS, CODEBOOK_SIZE)
     print("Semantic IDs (each row = one item):")
@@ -67,7 +69,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 3. Non-existent prefix → None
     # ------------------------------------------------------------------
-    bad_prefix = [CODEBOOK_SIZE + 99]   # guaranteed out-of-vocab
+    bad_prefix = [CODEBOOK_SIZE + 99]  # guaranteed out-of-vocab
     node = trie.find_prefix(bad_prefix)
     print(f"\n--- OOV prefix {bad_prefix}: node={node} (expected None) ---")
 
@@ -75,7 +77,7 @@ def main() -> None:
     # 4. Duplicate insertion is idempotent
     # ------------------------------------------------------------------
     trie2 = build_trie(ids)
-    build_trie(ids)   # insert same IDs again
+    build_trie(ids)  # insert same IDs again
     for row in ids.tolist():
         node = trie2.find_prefix(row)
         assert node is not None and node.is_end_of_token
@@ -88,7 +90,9 @@ def main() -> None:
     shared_trie.insert([1, 2, 3])
     shared_trie.insert([1, 2, 7])
     nexts_after_shared = valid_next_tokens(shared_trie, [1, 2])
-    print(f"\nShared prefix [1,2]: valid_next={sorted(nexts_after_shared)}  (expected [3, 7])")
+    print(
+        f"\nShared prefix [1,2]: valid_next={sorted(nexts_after_shared)}  (expected [3, 7])"
+    )
     assert sorted(nexts_after_shared) == [3, 7], f"Got {nexts_after_shared}"
 
     print("\nAll checks passed.")
@@ -125,11 +129,11 @@ def test_csr() -> None:
     print(f"  crow_indices : {rows1}")
     print(f"  col_indices  : {cols1}")
     print(f"  values       : {vals1}")
-    assert rows1 == [0, 1],              f"row_ptrs: {rows1}"
-    assert cols1[0] == 42,               f"root child token: {cols1[0]}"
-    assert vals1[0] == 1,                f"root child BFS index: {vals1[0]}"
+    assert rows1 == [0, 1], f"row_ptrs: {rows1}"
+    assert cols1[0] == 42, f"root child token: {cols1[0]}"
+    assert vals1[0] == 1, f"root child BFS index: {vals1[0]}"
     assert children_of(csr1, 0) == {42: 1}, "root → node_42 via token 42"
-    assert children_of(csr1, 1) == {},      "node_42 is a leaf"
+    assert children_of(csr1, 1) == {}, "node_42 is a leaf"
     print("  ✓")
 
     # ------------------------------------------------------------------
@@ -149,7 +153,7 @@ def test_csr() -> None:
     assert children_of(csr2, 0) == {1: 1}, "root → node@1 via token 1"
     assert children_of(csr2, 1) == {2: 2}, "node@1 → node@2 via token 2"
     assert children_of(csr2, 2) == {3: 3}, "node@2 → node@3 via token 3"
-    assert children_of(csr2, 3) == {},     "node@3 leaf"
+    assert children_of(csr2, 3) == {}, "node@3 leaf"
     print("  ✓")
 
     # ------------------------------------------------------------------
@@ -166,12 +170,12 @@ def test_csr() -> None:
     print(f"  crow_indices : {rows3}")
     print(f"  col_indices  : {cols3}")
     print(f"  values       : {vals3}")
-    assert rows3 == [0, 1, 2, 4, 4],          f"row_ptrs: {rows3}"
-    assert children_of(csr3, 0) == {1: 1},       "root → node@1"
-    assert children_of(csr3, 1) == {2: 2},       "node@1 → node@12"
+    assert rows3 == [0, 1, 2, 4, 4], f"row_ptrs: {rows3}"
+    assert children_of(csr3, 0) == {1: 1}, "root → node@1"
+    assert children_of(csr3, 1) == {2: 2}, "node@1 → node@12"
     assert children_of(csr3, 2) == {3: 3, 7: 4}, "node@12 → node@123 and node@127"
-    assert children_of(csr3, 3) == {},            "node@123 leaf"
-    assert children_of(csr3, 4) == {},            "node@127 leaf"
+    assert children_of(csr3, 3) == {}, "node@123 leaf"
+    assert children_of(csr3, 4) == {}, "node@127 leaf"
     print("  ✓")
 
     # ------------------------------------------------------------------
@@ -182,7 +186,9 @@ def test_csr() -> None:
         bfs_row = 0
         for token in target:
             ch = children_of(csr3, bfs_row)
-            assert token in ch, f"token {token} not valid at bfs_row={bfs_row}; children={ch}"
+            assert token in ch, (
+                f"token {token} not valid at bfs_row={bfs_row}; children={ch}"
+            )
             bfs_row = ch[token]
         print(f"  walk {target} → terminal BFS row {bfs_row}  ✓")
 
@@ -219,24 +225,26 @@ def test_csr() -> None:
     print(f"  col_indices  : {cols6}")
     print(f"  values       : {vals6}")
 
-    assert rows6 == [0, 2, 3, 4, 5, 7, 7, 7],       f"row_ptrs: {rows6}"
-    assert cols6  == [1, 3, 2, 1, 1, 2, 3, -1],      f"cols: {cols6}"
-    assert vals6  == [1, 2, 3, 4, 5, 6, 7, -1],      f"vals: {vals6}"
+    assert rows6 == [0, 2, 3, 4, 5, 7, 7, 7], f"row_ptrs: {rows6}"
+    assert cols6 == [1, 3, 2, 1, 1, 2, 3, -1], f"cols: {cols6}"
+    assert vals6 == [1, 2, 3, 4, 5, 6, 7, -1], f"vals: {vals6}"
 
     assert children_of(csr6, 0) == {1: 1, 3: 2}, "root has two children"
-    assert children_of(csr6, 1) == {2: 3},        "node[1] → node[1,2] via token 2"
-    assert children_of(csr6, 2) == {1: 4},        "node[3] → node[3,1] via token 1"
-    assert children_of(csr6, 3) == {1: 5},        "node[1,2] → node[1,2,1] via token 1"
-    assert children_of(csr6, 4) == {2: 6, 3: 7},  "node[3,1] → leaves via tokens 2 and 3"
-    assert children_of(csr6, 5) == {},             "node[1,2,1] leaf"
-    assert children_of(csr6, 6) == {},             "node[3,1,2] leaf"
-    assert children_of(csr6, 7) == {},             "node[3,1,3] leaf"
+    assert children_of(csr6, 1) == {2: 3}, "node[1] → node[1,2] via token 2"
+    assert children_of(csr6, 2) == {1: 4}, "node[3] → node[3,1] via token 1"
+    assert children_of(csr6, 3) == {1: 5}, "node[1,2] → node[1,2,1] via token 1"
+    assert children_of(csr6, 4) == {2: 6, 3: 7}, "node[3,1] → leaves via tokens 2 and 3"
+    assert children_of(csr6, 5) == {}, "node[1,2,1] leaf"
+    assert children_of(csr6, 6) == {}, "node[3,1,2] leaf"
+    assert children_of(csr6, 7) == {}, "node[3,1,3] leaf"
 
     for target in ([1, 2, 1], [3, 1, 2], [3, 1, 3]):
         bfs_row = 0
         for token in target:
             ch = children_of(csr6, bfs_row)
-            assert token in ch, f"token {token} not in children of bfs_row={bfs_row}: {ch}"
+            assert token in ch, (
+                f"token {token} not in children of bfs_row={bfs_row}: {ch}"
+            )
             bfs_row = ch[token]
         print(f"  walk {target} → terminal BFS row {bfs_row}  ✓")
 
@@ -273,19 +281,30 @@ def test_csr_sorted_batch() -> None:
         rows_b = b.row_ptrs.tolist()
         print(f"  trie rows : {rows_t}")
         print(f"  batch rows: {rows_b}")
-        assert cols_t == cols_b, f"{label} cols mismatch\n  trie : {cols_t}\n  batch: {cols_b}"
-        assert vals_t == vals_b, f"{label} vals mismatch\n  trie : {vals_t}\n  batch: {vals_b}"
-        assert rows_t == rows_b, f"{label} row_ptrs mismatch\n  trie : {rows_t}\n  batch: {rows_b}"
-        assert (t.dense_states == b.dense_states).all(), f"{label} dense_states mismatch"
+        assert cols_t == cols_b, (
+            f"{label} cols mismatch\n  trie : {cols_t}\n  batch: {cols_b}"
+        )
+        assert vals_t == vals_b, (
+            f"{label} vals mismatch\n  trie : {vals_t}\n  batch: {vals_b}"
+        )
+        assert rows_t == rows_b, (
+            f"{label} row_ptrs mismatch\n  trie : {rows_t}\n  batch: {rows_b}"
+        )
+        assert (t.dense_states == b.dense_states).all(), (
+            f"{label} dense_states mismatch"
+        )
 
     # ------------------------------------------------------------------
     # 1. Single token [42]
     # ------------------------------------------------------------------
     print("\n--- sorted_batch vs trie: [42] ---")
-    t1 = Trie(); t1.insert([42])
+    t1 = Trie()
+    t1.insert([42])
     b1 = csr_from_sorted_batch(lex_sort([[42]]), vocab_size=50, dense_lookup_layers=1)
     assert b1.dense_mask_by_layer[0].shape == (50,) and b1.dense_mask_by_layer[0][42]
-    assert_same_edges(csr_from_trie(t1, vocab_size=50, dense_lookup_layers=1), b1, "[42]")
+    assert_same_edges(
+        csr_from_trie(t1, vocab_size=50, dense_lookup_layers=1), b1, "[42]"
+    )
     assert children_of_batch(b1, 0) == {42: 1}
     assert children_of_batch(b1, 1) == {}
     assert b1.dense_states.shape == (50,)
@@ -297,7 +316,8 @@ def test_csr_sorted_batch() -> None:
     # 2. Linear chain [1, 2, 3]
     # ------------------------------------------------------------------
     print("\n--- sorted_batch vs trie: [1,2,3] ---")
-    t2 = Trie(); t2.insert([1, 2, 3])
+    t2 = Trie()
+    t2.insert([1, 2, 3])
     b2 = csr_from_sorted_batch(lex_sort([[1, 2, 3]]), vocab_size=8)
     assert_same_edges(csr_from_trie(t2, vocab_size=8), b2, "[1,2,3]")
     assert children_of_batch(b2, 0) == {1: 1}
@@ -305,17 +325,25 @@ def test_csr_sorted_batch() -> None:
     assert children_of_batch(b2, 2) == {3: 3}
     assert children_of_batch(b2, 3) == {}
     # default dense_lookup_layers=2: mask shape (8,8), indexed by (tok0, tok1)
-    assert b2.dense_mask_by_layer[1].shape == (8, 8) and b2.dense_mask_by_layer[1][1, 2] and b2.dense_mask_by_layer[1].sum() == 1
+    assert (
+        b2.dense_mask_by_layer[1].shape == (8, 8)
+        and b2.dense_mask_by_layer[1][1, 2]
+        and b2.dense_mask_by_layer[1].sum() == 1
+    )
     assert b2.dense_states.shape == (8, 8)
     # dense_states[1, 2] == BFS node ID reached after tokens (1, 2) == 2
-    assert b2.dense_states[1, 2] == children_of_batch(b2, children_of_batch(b2, 0)[1])[2]
+    assert (
+        b2.dense_states[1, 2] == children_of_batch(b2, children_of_batch(b2, 0)[1])[2]
+    )
     print("  ✓")
 
     # ------------------------------------------------------------------
     # 3. Branching [1,2,3] + [1,2,7]
     # ------------------------------------------------------------------
     print("\n--- sorted_batch vs trie: [1,2,3]+[1,2,7] ---")
-    t3 = Trie(); t3.insert([1, 2, 3]); t3.insert([1, 2, 7])
+    t3 = Trie()
+    t3.insert([1, 2, 3])
+    t3.insert([1, 2, 7])
     b3 = csr_from_sorted_batch(lex_sort([[1, 2, 3], [1, 2, 7]]), vocab_size=8)
     assert_same_edges(csr_from_trie(t3, vocab_size=8), b3, "[1,2,3]+[1,2,7]")
     assert children_of_batch(b3, 0) == {1: 1}
@@ -324,9 +352,15 @@ def test_csr_sorted_batch() -> None:
     assert children_of_batch(b3, 3) == {}
     assert children_of_batch(b3, 4) == {}
     # Both sequences share prefix (1,2), so only one cell is set
-    assert b3.dense_mask_by_layer[1].shape == (8, 8) and b3.dense_mask_by_layer[1][1, 2] and b3.dense_mask_by_layer[1].sum() == 1
+    assert (
+        b3.dense_mask_by_layer[1].shape == (8, 8)
+        and b3.dense_mask_by_layer[1][1, 2]
+        and b3.dense_mask_by_layer[1].sum() == 1
+    )
     assert b3.dense_states.shape == (8, 8)
-    assert b3.dense_states[1, 2] == children_of_batch(b3, children_of_batch(b3, 0)[1])[2]
+    assert (
+        b3.dense_states[1, 2] == children_of_batch(b3, children_of_batch(b3, 0)[1])[2]
+    )
     print("  ✓")
 
     # ------------------------------------------------------------------
@@ -355,7 +389,12 @@ def test_csr_sorted_batch() -> None:
             bfs_row = ch[token]
         print(f"  walk {target} → terminal BFS row {bfs_row}  ✓")
     # Prefixes: (1,2) and (3,1) are the unique 2-token starts
-    assert b4.dense_mask_by_layer[1].shape == (8, 8) and b4.dense_mask_by_layer[1][1, 2] and b4.dense_mask_by_layer[1][3, 1] and b4.dense_mask_by_layer[1].sum() == 2
+    assert (
+        b4.dense_mask_by_layer[1].shape == (8, 8)
+        and b4.dense_mask_by_layer[1][1, 2]
+        and b4.dense_mask_by_layer[1][3, 1]
+        and b4.dense_mask_by_layer[1].sum() == 2
+    )
     assert b4.dense_states.shape == (8, 8)
     node_1 = children_of_batch(b4, 0)[1]
     assert b4.dense_states[1, 2] == children_of_batch(b4, node_1)[2]
@@ -378,7 +417,11 @@ def test_csr_sorted_batch() -> None:
     assert 2 in children_of_batch(b5, 0), "token 2 missing from root children"
     # dense mask: prefixes (0,1), (0,3), (2,0) must be set; nothing else
     assert b5.dense_mask_by_layer[1].shape == (4, 4)
-    assert b5.dense_mask_by_layer[1][0, 1] and b5.dense_mask_by_layer[1][0, 3] and b5.dense_mask_by_layer[1][2, 0]
+    assert (
+        b5.dense_mask_by_layer[1][0, 1]
+        and b5.dense_mask_by_layer[1][0, 3]
+        and b5.dense_mask_by_layer[1][2, 0]
+    )
     assert b5.dense_mask_by_layer[1].sum() == 3
     assert b5.dense_states.shape == (4, 4)
     node_0 = children_of_batch(b5, 0)[0]
@@ -419,8 +462,9 @@ def test_csr_sorted_batch() -> None:
             ch_b = children_of_batch(csr_b, bfs_b)
             assert token in ch_t, f"trie: token {token} missing at {bfs_t}"
             assert token in ch_b, f"batch: token {token} missing at {bfs_b}"
-            assert ch_t[token] == ch_b[token], \
+            assert ch_t[token] == ch_b[token], (
                 f"next-state mismatch for token {token}: trie={ch_t[token]} batch={ch_b[token]}"
+            )
             bfs_t = ch_t[token]
             bfs_b = ch_b[token]
     print("  All walks agree between trie and sorted_batch CSR  ✓")
@@ -455,11 +499,11 @@ def test_vtnk() -> None:
     nn, vi, cl = vtnk_pytorch(logits, torch.tensor([0]), csr, step=0)
     assert nn.shape == vi.shape == (1, csr.layer_max_branches[0])
     assert cl.shape == (1, 8)
-    assert sorted(nn[0][nn[0] >= 0].tolist()) == [1, 2]   # child BFS IDs
-    assert sorted(vi[0][vi[0] >= 0].tolist()) == [1, 3]   # valid tokens (1 and 3)
-    assert cl[0, 1] == 0.0 and cl[0, 3] == 0.0            # valid tokens keep logit
-    assert cl[0, 0].item() == float('-inf')                # invalid → -inf
-    assert (cl[0] > float('-inf')).sum() == 2
+    assert sorted(nn[0][nn[0] >= 0].tolist()) == [1, 2]  # child BFS IDs
+    assert sorted(vi[0][vi[0] >= 0].tolist()) == [1, 3]  # valid tokens (1 and 3)
+    assert cl[0, 1] == 0.0 and cl[0, 3] == 0.0  # valid tokens keep logit
+    assert cl[0, 0].item() == float("-inf")  # invalid → -inf
+    assert (cl[0] > float("-inf")).sum() == 2
     print("  ✓")
 
     # ------------------------------------------------------------------
@@ -472,7 +516,7 @@ def test_vtnk() -> None:
     assert cl.shape == (2, 8)
     assert (nn[0] == nn[1]).all() and (vi[0] == vi[1]).all() and (cl[0] == cl[1]).all()
     assert sorted(vi[0][vi[0] >= 0].tolist()) == [1, 3]
-    assert (cl[0] > float('-inf')).sum() == 2
+    assert (cl[0] > float("-inf")).sum() == 2
     print("  ✓")
 
     # ------------------------------------------------------------------
@@ -484,10 +528,10 @@ def test_vtnk() -> None:
     nn, vi, cl = vtnk_pytorch(logits, torch.tensor([1, 2]), csr, step=1)
     assert nn.shape == vi.shape == (2, csr.layer_max_branches[1])
     assert cl.shape == (2, 8)
-    assert nn[0, 0] == 3 and nn[1, 0] == 4       # child BFS IDs
-    assert vi[0, 0] == 2 and vi[1, 0] == 1       # valid tokens
-    assert cl[0, 2] == 0.0 and cl[0, 1].item() == float('-inf')
-    assert cl[1, 1] == 0.0 and cl[1, 2].item() == float('-inf')
+    assert nn[0, 0] == 3 and nn[1, 0] == 4  # child BFS IDs
+    assert vi[0, 0] == 2 and vi[1, 0] == 1  # valid tokens
+    assert cl[0, 2] == 0.0 and cl[0, 1].item() == float("-inf")
+    assert cl[1, 1] == 0.0 and cl[1, 2].item() == float("-inf")
     print("  ✓")
 
     # ------------------------------------------------------------------
@@ -502,10 +546,10 @@ def test_vtnk() -> None:
     assert (nn[0] == nn[1]).all() and (vi[0] == vi[1]).all()  # same node → same row
     assert sorted(nn[2][nn[2] >= 0].tolist()) == [6, 7]
     assert sorted(vi[2][vi[2] >= 0].tolist()) == [2, 3]
-    assert (cl[0] > float('-inf')).sum() == 1
-    assert (cl[2] > float('-inf')).sum() == 2
+    assert (cl[0] > float("-inf")).sum() == 1
+    assert (cl[2] > float("-inf")).sum() == 2
     assert cl[2, 2] == 0.0 and cl[2, 3] == 0.0
-    assert cl[2, 0].item() == float('-inf')
+    assert cl[2, 0].item() == float("-inf")
     print("  ✓")
 
     print("\nAll vtnk_pytorch checks passed.")

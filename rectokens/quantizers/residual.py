@@ -97,7 +97,7 @@ class ResidualQuantizer(nn.Module):
 
         for quantizer in self._levels:
             out = quantizer.quantize(residual)
-            all_codes.append(out.codes)       # (B,)
+            all_codes.append(out.codes)  # (B,)
             level_outputs.append(out)
             total_quantized = total_quantized + out.quantized
             residual = out.residuals

@@ -5,11 +5,15 @@ from rectokens.decoding.schemas.compact_csr_trie import CompactCSRTrie
 from typing import NamedTuple
 
 
-def csr_from_trie(trie: Trie, vocab_size: int, dense_lookup_layers: int = 2) -> CompactCSRTrie:
+def csr_from_trie(
+    trie: Trie, vocab_size: int, dense_lookup_layers: int = 2
+) -> CompactCSRTrie:
     row_ptrs = []
     col_idxs = []
     max_children_at_depth: dict[int, int] = {}
-    dense_lookup_mask = torch.zeros([vocab_size] * dense_lookup_layers, dtype=torch.bool)
+    dense_lookup_mask = torch.zeros(
+        [vocab_size] * dense_lookup_layers, dtype=torch.bool
+    )
     dense_states = torch.zeros([vocab_size] * dense_lookup_layers, dtype=torch.long)
 
     next_bfs_idx = 1  # root is BFS row 0
@@ -19,7 +23,9 @@ def csr_from_trie(trie: Trie, vocab_size: int, dense_lookup_layers: int = 2) -> 
         row_ptrs.append(len(col_idxs))
 
         n_children = len(node.children)
-        max_children_at_depth[depth] = max(max_children_at_depth.get(depth, 0), n_children)
+        max_children_at_depth[depth] = max(
+            max_children_at_depth.get(depth, 0), n_children
+        )
 
         for token, child in node.children.items():
             col_idxs.append(token)
@@ -55,7 +61,10 @@ def csr_from_trie(trie: Trie, vocab_size: int, dense_lookup_layers: int = 2) -> 
         dense_states=dense_states,
     )
 
-def csr_from_sorted_batch(sem_ids: torch.Tensor, vocab_size: int, dense_lookup_layers: int = 2):
+
+def csr_from_sorted_batch(
+    sem_ids: torch.Tensor, vocab_size: int, dense_lookup_layers: int = 2
+):
     """
     Expects sem_ids to be a 2D tensor with rows lexicographically sorted.
     """
@@ -69,10 +78,12 @@ def csr_from_sorted_batch(sem_ids: torch.Tensor, vocab_size: int, dense_lookup_l
     is_new_node_T = is_new_node.T.contiguous()  # (L, N)
     node_ids = is_new_node_T.flatten().cumsum(0).view(L, N)
 
-    cols = torch.cat([
-        sem_ids.T[is_new_node_T],
-        torch.tensor([-1], dtype=sem_ids.dtype, device=device)
-    ])
+    cols = torch.cat(
+        [
+            sem_ids.T[is_new_node_T],
+            torch.tensor([-1], dtype=sem_ids.dtype, device=device),
+        ]
+    )
 
     # Parent IDs for each edge — sorted by construction (node_ids is a cumsum)
     parts = [torch.zeros(int(is_new_node[:, 0].sum()), dtype=torch.long, device=device)]
@@ -83,30 +94,44 @@ def csr_from_sorted_batch(sem_ids: torch.Tensor, vocab_size: int, dense_lookup_l
         layer_max_branches.append(int(t.bincount().max()) if len(t) > 0 else 0)
     parents = torch.cat(parts)  # (nnz,) sorted
 
-    changes = torch.where(parents.diff() != 0)[0] + 1 if len(parents) > 1 else torch.zeros(0, dtype=torch.long, device=device)
+    changes = (
+        torch.where(parents.diff() != 0)[0] + 1
+        if len(parents) > 1
+        else torch.zeros(0, dtype=torch.long, device=device)
+    )
 
     n_edges = len(cols) - 1
-    rows = torch.cat([
-        torch.zeros(1, dtype=torch.long, device=device),
-        changes,
-        torch.full((n_edges - len(changes),), n_edges, dtype=torch.long, device=device),
-    ])
+    rows = torch.cat(
+        [
+            torch.zeros(1, dtype=torch.long, device=device),
+            changes,
+            torch.full(
+                (n_edges - len(changes),), n_edges, dtype=torch.long, device=device
+            ),
+        ]
+    )
 
     vals = torch.arange(1, len(cols) + 1, device=device)
     vals[-1] = -1
 
-    mask = torch.zeros([vocab_size]*dense_lookup_layers, dtype=torch.bool, device=sem_ids.device)
+    mask = torch.zeros(
+        [vocab_size] * dense_lookup_layers, dtype=torch.bool, device=sem_ids.device
+    )
     mask[sem_ids[:, :dense_lookup_layers].unbind(-1)] = True
 
-    dense_states = torch.zeros([vocab_size] * dense_lookup_layers, dtype=torch.long, device=device)
-    dense_states[sem_ids[:, :dense_lookup_layers].unbind(-1)] = node_ids[dense_lookup_layers - 1]
+    dense_states = torch.zeros(
+        [vocab_size] * dense_lookup_layers, dtype=torch.long, device=device
+    )
+    dense_states[sem_ids[:, :dense_lookup_layers].unbind(-1)] = node_ids[
+        dense_lookup_layers - 1
+    ]
 
     dense_mask_by_layer = []
-    for _ in range(dense_lookup_layers-1, -1, -1):
+    for _ in range(dense_lookup_layers - 1, -1, -1):
         dense_mask_by_layer.append(mask)
         mask = mask.any(dim=-1)
     dense_mask_by_layer.reverse()
-    
+
     return CompactCSRTrie(
         row_ptrs=rows,
         stacked_cols_vals=torch.stack([cols, vals]),
@@ -114,10 +139,3 @@ def csr_from_sorted_batch(sem_ids: torch.Tensor, vocab_size: int, dense_lookup_l
         dense_mask_by_layer=dense_mask_by_layer,
         dense_states=dense_states,
     )
-
-
-
-
-
-    
-
