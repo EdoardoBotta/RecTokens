@@ -1,8 +1,11 @@
-import torch 
-from rectokens.ops.constrained_node_transition import fused_linear_constrained_node_transition
+import torch
+from rectokens.ops.constrained_node_transition import (
+    fused_linear_constrained_node_transition,
+)
 from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 from torch import nn
 from typing import Optional
+
 
 class ConstrainedLinear(nn.Module):
     def __init__(self, base_linear: nn.Linear):
@@ -12,7 +15,9 @@ class ConstrainedLinear(nn.Module):
         self.next_nodes: Optional[torch.Tensor] = None
         self.valid_idxs: Optional[torch.Tensor] = None
 
-    def set_context(self, cur_node: torch.Tensor, trie: CompactCSRTrie, step: int) -> None:
+    def set_context(
+        self, cur_node: torch.Tensor, trie: CompactCSRTrie, step: int
+    ) -> None:
         self._ctx = (cur_node, trie, step)
 
     def clear_context(self) -> None:

@@ -3,6 +3,7 @@ from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 from typing import NamedTuple
 from typing import Optional
 
+
 class GenerationState(NamedTuple):
     generated_ids: torch.Tensor
     kv_cache: dict[int, torch.Tensor]

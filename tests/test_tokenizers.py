@@ -23,8 +23,12 @@ BATCH_SIZE = 64
 LR = 1e-3
 
 
-def _train_rqvae(tok: RQVAETokenizer, data: torch.Tensor, steps: int, lr: float) -> list[float]:
-    optimizer = torch.optim.Adam([p for p in tok.parameters() if p.requires_grad], lr=lr)
+def _train_rqvae(
+    tok: RQVAETokenizer, data: torch.Tensor, steps: int, lr: float
+) -> list[float]:
+    optimizer = torch.optim.Adam(
+        [p for p in tok.parameters() if p.requires_grad], lr=lr
+    )
     tok.train()
     losses: list[float] = []
     n = len(data)
@@ -43,7 +47,6 @@ def _train_rqvae(tok: RQVAETokenizer, data: torch.Tensor, steps: int, lr: float)
 
 
 class TestTokenizers(unittest.TestCase):
-
     @classmethod
     def setUpClass(cls) -> None:
         # RQKMeans setup
@@ -71,7 +74,9 @@ class TestTokenizers(unittest.TestCase):
             num_levels=NUM_LEVELS,
             codebook_size=CODEBOOK_SIZE,
         )
-        cls.rqvae_losses = _train_rqvae(cls.rqvae_tok, cls.rqvae_data, steps=RQVAE_TRAIN_STEPS, lr=LR)
+        cls.rqvae_losses = _train_rqvae(
+            cls.rqvae_tok, cls.rqvae_data, steps=RQVAE_TRAIN_STEPS, lr=LR
+        )
 
     # ---------------------------------------------------------------------------
     # RQKMeansTokenizer
@@ -123,7 +128,9 @@ class TestTokenizers(unittest.TestCase):
         assert flat.dtype == torch.long
 
     def test_rqkmeans_tensor_dataset(self) -> None:
-        tok = RQKMeansTokenizer(num_levels=NUM_LEVELS, codebook_size=CODEBOOK_SIZE, dim=DIM)
+        tok = RQKMeansTokenizer(
+            num_levels=NUM_LEVELS, codebook_size=CODEBOOK_SIZE, dim=DIM
+        )
         for batch in self.tensor_dataset.iter_batches(batch_size=BATCH_SIZE):
             tok.fit_step(batch)
         tokens = tok.encode(self.tensor_data[:4])
@@ -139,7 +146,9 @@ class TestTokenizers(unittest.TestCase):
             assert (loaded.encode(features).codes == tokens.codes).all()
 
     def test_rqkmeans_encode_before_fit_raises(self) -> None:
-        tok = RQKMeansTokenizer(num_levels=NUM_LEVELS, codebook_size=CODEBOOK_SIZE, dim=DIM)
+        tok = RQKMeansTokenizer(
+            num_levels=NUM_LEVELS, codebook_size=CODEBOOK_SIZE, dim=DIM
+        )
         with self.assertRaises(RuntimeError):
             tok.encode(torch.randn(4, DIM))
 

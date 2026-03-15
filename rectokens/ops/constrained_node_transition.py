@@ -6,6 +6,7 @@ from rectokens.kernels.constrained_node_transition import (
 )
 from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 
+
 def fused_linear_constrained_node_transition(
     a: torch.Tensor,
     b: torch.Tensor,

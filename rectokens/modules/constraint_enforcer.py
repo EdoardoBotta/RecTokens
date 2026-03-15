@@ -17,7 +17,9 @@ class ConstraintEnforcer(nn.Module):
         self.constrained_linear: Optional[ConstrainedLinear] = None
 
     @classmethod
-    def convert_to_constrained_linear(cls, model: nn.Module, attr_path: str) -> ConstrainedLinear:
+    def convert_to_constrained_linear(
+        cls, model: nn.Module, attr_path: str
+    ) -> ConstrainedLinear:
         """
         Replace the output projection layer at `attr_path` with a ConstrainedLinear.
 
@@ -57,7 +59,9 @@ class ConstraintEnforcer(nn.Module):
 
     def convert(self, model: nn.Module) -> nn.Module:
         """Replace the output projection in `model` with a ConstrainedLinear in-place."""
-        self.constrained_linear = self.convert_to_constrained_linear(model, self.attr_path)
+        self.constrained_linear = self.convert_to_constrained_linear(
+            model, self.attr_path
+        )
         return model
 
     def forward(self, *args, **kwargs):

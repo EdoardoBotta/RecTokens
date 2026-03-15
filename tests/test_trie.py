@@ -14,7 +14,9 @@ from rectokens.decoding.vntk import vtnk_pytorch
 # ---------------------------------------------------------------------------
 
 
-def make_semantic_ids(num_items: int, num_levels: int, codebook_size: int, seed: int = 0) -> torch.Tensor:
+def make_semantic_ids(
+    num_items: int, num_levels: int, codebook_size: int, seed: int = 0
+) -> torch.Tensor:
     rng = torch.Generator()
     rng.manual_seed(seed)
     return torch.randint(0, codebook_size, (num_items, num_levels), generator=rng)
@@ -47,9 +49,15 @@ def assert_same_edges(t: CompactCSRTrie, b: CompactCSRTrie, label: str) -> None:
     vals_b = b.stacked_cols_vals[1].tolist()
     rows_t = t.row_ptrs.tolist()
     rows_b = b.row_ptrs.tolist()
-    assert cols_t == cols_b, f"{label} cols mismatch\n  trie : {cols_t}\n  batch: {cols_b}"
-    assert vals_t == vals_b, f"{label} vals mismatch\n  trie : {vals_t}\n  batch: {vals_b}"
-    assert rows_t == rows_b, f"{label} row_ptrs mismatch\n  trie : {rows_t}\n  batch: {rows_b}"
+    assert cols_t == cols_b, (
+        f"{label} cols mismatch\n  trie : {cols_t}\n  batch: {cols_b}"
+    )
+    assert vals_t == vals_b, (
+        f"{label} vals mismatch\n  trie : {vals_t}\n  batch: {vals_b}"
+    )
+    assert rows_t == rows_b, (
+        f"{label} row_ptrs mismatch\n  trie : {rows_t}\n  batch: {rows_b}"
+    )
     assert (t.dense_states == b.dense_states).all(), f"{label} dense_states mismatch"
 
 
@@ -58,7 +66,6 @@ def lex_sort(rows: list[list[int]]) -> torch.Tensor:
 
 
 class TestTrie(unittest.TestCase):
-
     @classmethod
     def setUpClass(cls) -> None:
         cls.semantic_ids = make_semantic_ids(12, 3, 8, seed=0)
@@ -189,9 +196,13 @@ class TestTrie(unittest.TestCase):
     def test_csr_sorted_batch_single_token(self) -> None:
         t = Trie()
         t.insert([42])
-        b = csr_from_sorted_batch(lex_sort([[42]]), vocab_size=50, dense_lookup_layers=1)
+        b = csr_from_sorted_batch(
+            lex_sort([[42]]), vocab_size=50, dense_lookup_layers=1
+        )
         assert b.dense_mask_by_layer[0].shape == (50,) and b.dense_mask_by_layer[0][42]
-        assert_same_edges(csr_from_trie(t, vocab_size=50, dense_lookup_layers=1), b, "[42]")
+        assert_same_edges(
+            csr_from_trie(t, vocab_size=50, dense_lookup_layers=1), b, "[42]"
+        )
         assert children_of(b, 0) == {42: 1}
         assert children_of(b, 1) == {}
         assert b.dense_states.shape == (50,)
@@ -249,7 +260,11 @@ class TestTrie(unittest.TestCase):
         assert_same_edges(csr_from_trie(t, vocab_size=4), b, "zero-token seqs")
         assert 0 in children_of(b, 0)
         assert 2 in children_of(b, 0)
-        assert b.dense_mask_by_layer[1][0, 1] and b.dense_mask_by_layer[1][0, 3] and b.dense_mask_by_layer[1][2, 0]
+        assert (
+            b.dense_mask_by_layer[1][0, 1]
+            and b.dense_mask_by_layer[1][0, 3]
+            and b.dense_mask_by_layer[1][2, 0]
+        )
         assert b.dense_mask_by_layer[1].sum() == 3
         for target in seqs:
             bfs_row = 0
@@ -298,7 +313,9 @@ class TestTrie(unittest.TestCase):
         logits = torch.zeros(2, 8)
         nn, vi, cl = vtnk_pytorch(logits, torch.tensor([0, 0]), csr, step=0)
         assert nn.shape == vi.shape == (2, csr.layer_max_branches[0])
-        assert (nn[0] == nn[1]).all() and (vi[0] == vi[1]).all() and (cl[0] == cl[1]).all()
+        assert (
+            (nn[0] == nn[1]).all() and (vi[0] == vi[1]).all() and (cl[0] == cl[1]).all()
+        )
         assert sorted(vi[0][vi[0] >= 0].tolist()) == [1, 3]
 
     def test_vtnk_batch2_different_nodes(self) -> None:

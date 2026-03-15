@@ -42,7 +42,9 @@ SEQS_3 = [
 
 def make_trie(seqs, vocab_size=8, dense_lookup_layers=2):
     t = torch.tensor(sorted(seqs), dtype=torch.long, device=device)
-    return csr_from_sorted_batch(t, vocab_size=vocab_size, dense_lookup_layers=dense_lookup_layers)
+    return csr_from_sorted_batch(
+        t, vocab_size=vocab_size, dense_lookup_layers=dense_lookup_layers
+    )
 
 
 class _ModelWithKVCache(nn.Module):
@@ -57,7 +59,9 @@ class _ModelWithKVCache(nn.Module):
     def forward(self, input_ids, kv_cache=None):
         x = self.embedding(input_ids)
         logits = self.linear(x)
-        new_cache = {0: torch.zeros(input_ids.shape[0], self.cache_dim, device=input_ids.device)}
+        new_cache = {
+            0: torch.zeros(input_ids.shape[0], self.cache_dim, device=input_ids.device)
+        }
         return ModelInferenceOutput(logits=logits[:, -1], kv_cache=new_cache)
 
 
@@ -82,7 +86,6 @@ def _run_beam_loop(trie, model, input_ids, vocab_size, seq_len, k, beam_size):
 
 
 class TestConstrainedDecoding(unittest.TestCase):
-
     def test_decode_one_step_dense_path_xfail(self) -> None:
         """Exercise the dense-lookup branch (step < dense_lookup_layers)."""
         vocab_size = 8
@@ -162,7 +165,9 @@ class TestConstrainedDecoding(unittest.TestCase):
             gen = state.generation_state
             assert gen.generated_ids.shape == (B, k, step + 1)
             assert gen.log_probas.shape == (B * k,)
-            input_ids = gen.generated_ids.reshape(-1, gen.generated_ids.shape[-1])[:, -1:]
+            input_ids = gen.generated_ids.reshape(-1, gen.generated_ids.shape[-1])[
+                :, -1:
+            ]
 
     def test_beam_search_all_outputs_valid_mixed_dense_nondense(self) -> None:
         """Every beam produces a valid trie sequence (dense_lookup_layers=2, seq_len=5)."""
@@ -173,7 +178,9 @@ class TestConstrainedDecoding(unittest.TestCase):
         B, seq_len, k, beam_size = 2, 4, 4, 8
         input_ids = torch.randint(0, vocab_size, (B, seq_len), device=device)
 
-        state = _run_beam_loop(trie, model, input_ids, vocab_size, len(SEQS_5[0]), k, beam_size)
+        state = _run_beam_loop(
+            trie, model, input_ids, vocab_size, len(SEQS_5[0]), k, beam_size
+        )
 
         generated = state.generation_state.generated_ids.reshape(-1, len(SEQS_5[0]))
         index = torch.tensor(SEQS_5, device=device)
@@ -184,13 +191,17 @@ class TestConstrainedDecoding(unittest.TestCase):
         """Every beam is valid when dense_lookup_layers covers all steps."""
         vocab_size = 8
         sem_ids_length = len(SEQS_3[0])
-        trie = make_trie(SEQS_3, vocab_size=vocab_size, dense_lookup_layers=sem_ids_length)
+        trie = make_trie(
+            SEQS_3, vocab_size=vocab_size, dense_lookup_layers=sem_ids_length
+        )
         model = RandomModel(vocab_size=vocab_size, hidden_size=16).to(device)
 
         B, seq_len, k, beam_size = 2, 4, 4, 8
         input_ids = torch.randint(0, vocab_size, (B, seq_len), device=device)
 
-        state = _run_beam_loop(trie, model, input_ids, vocab_size, sem_ids_length, k, beam_size)
+        state = _run_beam_loop(
+            trie, model, input_ids, vocab_size, sem_ids_length, k, beam_size
+        )
 
         generated = state.generation_state.generated_ids.reshape(-1, len(SEQS_3[0]))
         index = torch.tensor(SEQS_3, device=device)
@@ -207,7 +218,9 @@ class TestConstrainedDecoding(unittest.TestCase):
         B, seq_len, k, beam_size = 2, 4, 4, 8
         input_ids = torch.randint(0, vocab_size, (B, seq_len), device=device)
 
-        state = _run_beam_loop(trie, model, input_ids, vocab_size, sem_ids_length, k, beam_size)
+        state = _run_beam_loop(
+            trie, model, input_ids, vocab_size, sem_ids_length, k, beam_size
+        )
 
         generated = state.generation_state.generated_ids.reshape(-1, len(SEQS_3[0]))
         index = torch.tensor(SEQS_3, device=device)
@@ -284,7 +297,9 @@ class TestConstrainedDecoding(unittest.TestCase):
         B, seq_len = 2, 4
         input_ids = torch.randint(0, vocab_size, (B, seq_len), device=device)
 
-        state = _run_beam_loop(trie, model, input_ids, vocab_size, len(SEQS_5[0]), k=1, beam_size=1)
+        state = _run_beam_loop(
+            trie, model, input_ids, vocab_size, len(SEQS_5[0]), k=1, beam_size=1
+        )
 
         generated = state.generation_state.generated_ids
         assert generated.shape == (B, 1, len(SEQS_5[0]))

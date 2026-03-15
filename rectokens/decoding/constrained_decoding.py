@@ -5,7 +5,9 @@ from rectokens.schemas.state import ConstrainedGenerationState
 from rectokens.schemas.state import ConstraintState
 from rectokens.schemas.state import GenerationState
 from rectokens.ops.constrained_node_transition import constrained_node_transition
-from rectokens.ops.constrained_node_transition import fused_linear_constrained_node_transition
+from rectokens.ops.constrained_node_transition import (
+    fused_linear_constrained_node_transition,
+)
 from rectokens.modules.constrained_linear import ConstrainedLinear
 from rectokens.modules.constraint_enforcer import ConstraintEnforcer
 from typing import NamedTuple
@@ -29,7 +31,6 @@ class RandomModel(nn.Module):
         hidden = x[:, -1]
         logits = self.linear(hidden)
         return ModelInferenceOutput(logits=logits, kv_cache=None)
-
 
 
 @torch.inference_mode()
@@ -110,9 +111,11 @@ def decode_one_step(
         kv_cache = generation_state.kv_cache
         log_probas = generation_state.log_probas
 
-    constrained_linear = next(
-        (m for m in model_fwd.modules() if isinstance(m, ConstrainedLinear)), None
-    ) if isinstance(model_fwd, nn.Module) else None
+    constrained_linear = (
+        next((m for m in model_fwd.modules() if isinstance(m, ConstrainedLinear)), None)
+        if isinstance(model_fwd, nn.Module)
+        else None
+    )
 
     if constrained_linear is not None and step >= len(trie.dense_mask_by_layer):
         cur_node = constrained_generation_state.constraint_state.cur_node
@@ -130,8 +133,7 @@ def decode_one_step(
 
     # Flatten (B, k, t) -> (B*k, t) for internal indexing; first step has no prior ids
     prev_generated_ids_flat = (
-        None if is_first_step
-        else generation_state.generated_ids.reshape(B * k, -1)
+        None if is_first_step else generation_state.generated_ids.reshape(B * k, -1)
     )
 
     next_node = None
@@ -148,7 +150,10 @@ def decode_one_step(
     else:
         cur_node = constrained_generation_state.constraint_state.cur_node
         if constrained_linear is not None:
-            next_nodes, valid_idxs = constrained_linear.next_nodes, constrained_linear.valid_idxs
+            next_nodes, valid_idxs = (
+                constrained_linear.next_nodes,
+                constrained_linear.valid_idxs,
+            )
         else:
             next_nodes, valid_idxs, logits = constrained_node_transition(
                 logits,
@@ -194,7 +199,9 @@ def decode_one_step(
         top_k_log_probas, top_k_indices = total_log_probas.topk(k, dim=1)  # (B, k)
 
         # Identify parent beams and reorder generated_ids / kv_cache accordingly
-        parent_beam_ids = top_k_indices // beam_size  # (B, k) — which beam [0,k) within each B
+        parent_beam_ids = (
+            top_k_indices // beam_size
+        )  # (B, k) — which beam [0,k) within each B
         flat_parent_ids = (
             torch.arange(B, device=input_ids.device).unsqueeze(1) * k + parent_beam_ids
         ).reshape(B * k)  # indices into [0, B*k)
@@ -218,11 +225,13 @@ def decode_one_step(
         # pre-selection beams.  Reorder by flat_parent_ids so row i aligns with the
         # parent of new beam i, then find which branch column matches the token chosen
         # for each new beam.
-        next_nodes_reordered = next_nodes[flat_parent_ids]   # (B*k, max_branches)
-        valid_idxs_reordered = valid_idxs[flat_parent_ids]   # (B*k, max_branches)
-        selected_tokens = generated_ids[:, -1]               # (B*k,)
-        branch_match = valid_idxs_reordered == selected_tokens.unsqueeze(1)  # (B*k, max_branches)
-        next_node = next_nodes_reordered[branch_match]        # (B*k,)
+        next_nodes_reordered = next_nodes[flat_parent_ids]  # (B*k, max_branches)
+        valid_idxs_reordered = valid_idxs[flat_parent_ids]  # (B*k, max_branches)
+        selected_tokens = generated_ids[:, -1]  # (B*k,)
+        branch_match = valid_idxs_reordered == selected_tokens.unsqueeze(
+            1
+        )  # (B*k, max_branches)
+        next_node = next_nodes_reordered[branch_match]  # (B*k,)
 
     return ConstrainedGenerationState(
         generation_state=GenerationState(
