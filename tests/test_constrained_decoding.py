@@ -20,7 +20,7 @@ from rectokens.decoding.constrained_decoding import (
     RandomModel,
     decode_one_step,
 )
-from rectokens.decoding.csr import csr_from_sorted_batch
+from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 
 device = torch.device("cuda")
 
@@ -43,7 +43,7 @@ SEQS_3 = [
 
 def make_trie(seqs, vocab_size=8, dense_lookup_layers=2):
     t = torch.tensor(sorted(seqs), dtype=torch.long, device=device)
-    return csr_from_sorted_batch(
+    return CompactCSRTrie.from_sorted_batch(
         t, vocab_size=vocab_size, dense_lookup_layers=dense_lookup_layers
     )
 

@@ -3,16 +3,11 @@ import triton
 import triton.language as tl
 from torch.library import triton_op
 from torch.library import wrap_triton
+from rectokens.kernels.utils import tl_fp32_to_tf32
 
 IS_PTX_RNA_TF32_SUPPORTED = (
     torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 8
 )
-
-
-def nearest_neighbor_quantize(x: torch.Tensor, codebook: torch.Tensor):
-    if x.shape[-1] <= 128 and x.shape[0] > 2 * codebook.shape[0]:
-        return quantize_fwd(x, codebook)
-    return quantize_fwd_mm(x, codebook)[0]
 
 
 @triton_op("kmeans::quantize", mutates_args={})
@@ -117,13 +112,6 @@ def quantize_fwd_kernel(
 
     out_ptrs = out_ptr + offs_B
     tl.store(out_ptrs, cluster, mask=offs_B < B)
-
-
-@triton.jit
-def tl_fp32_to_tf32(x):
-    return tl.inline_asm_elementwise(
-        "cvt.rna.tf32.f32 $0, $1;", "=r, r", [x], dtype=tl.float32, is_pure=True, pack=1
-    )
 
 
 @triton_op("kmeans::quantize_mm", mutates_args={})

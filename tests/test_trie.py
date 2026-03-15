@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from rectokens.decoding.csr import CompactCSRTrie, csr_from_sorted_batch, csr_from_trie
+from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 from rectokens.decoding.trie import Trie
 from rectokens.decoding.vntk import vtnk_pytorch
 
@@ -70,7 +70,7 @@ class TestTrie(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.semantic_ids = make_semantic_ids(12, 3, 8, seed=0)
         cls.semantic_trie = build_trie(cls.semantic_ids)
-        cls.csr_three_seqs = csr_from_sorted_batch(
+        cls.csr_three_seqs = CompactCSRTrie.from_sorted_batch(
             lex_sort([[1, 2, 1], [3, 1, 2], [3, 1, 3]]), vocab_size=8
         )
 
@@ -114,7 +114,7 @@ class TestTrie(unittest.TestCase):
     def test_csr_single_token(self) -> None:
         t = Trie()
         t.insert([42])
-        csr = csr_from_trie(t, vocab_size=50, dense_lookup_layers=1)
+        csr = CompactCSRTrie.from_trie(t, vocab_size=50, dense_lookup_layers=1)
         assert csr.row_ptrs.tolist() == [0, 1]
         assert csr.stacked_cols_vals[0].tolist()[0] == 42
         assert csr.stacked_cols_vals[1].tolist()[0] == 1
@@ -124,7 +124,7 @@ class TestTrie(unittest.TestCase):
     def test_csr_linear_chain(self) -> None:
         t = Trie()
         t.insert([1, 2, 3])
-        csr = csr_from_trie(t, vocab_size=8)
+        csr = CompactCSRTrie.from_trie(t, vocab_size=8)
         assert csr.row_ptrs.tolist() == [0, 1, 2, 3]
         assert children_of(csr, 0) == {1: 1}
         assert children_of(csr, 1) == {2: 2}
@@ -135,7 +135,7 @@ class TestTrie(unittest.TestCase):
         t = Trie()
         t.insert([1, 2, 3])
         t.insert([1, 2, 7])
-        csr = csr_from_trie(t, vocab_size=8)
+        csr = CompactCSRTrie.from_trie(t, vocab_size=8)
         assert csr.row_ptrs.tolist() == [0, 1, 2, 4, 4]
         assert children_of(csr, 0) == {1: 1}
         assert children_of(csr, 1) == {2: 2}
@@ -147,7 +147,7 @@ class TestTrie(unittest.TestCase):
         t = Trie()
         t.insert([1, 2, 3])
         t.insert([1, 2, 7])
-        csr = csr_from_trie(t, vocab_size=8)
+        csr = CompactCSRTrie.from_trie(t, vocab_size=8)
         for target in ([1, 2, 3], [1, 2, 7]):
             bfs_row = 0
             for token in target:
@@ -157,7 +157,7 @@ class TestTrie(unittest.TestCase):
 
     def test_csr_random_batch(self) -> None:
         trie = build_trie(self.semantic_ids)
-        csr = csr_from_trie(trie, vocab_size=8)
+        csr = CompactCSRTrie.from_trie(trie, vocab_size=8)
         for row in self.semantic_ids.tolist():
             bfs_row = 0
             for token in row:
@@ -170,7 +170,7 @@ class TestTrie(unittest.TestCase):
         t.insert([1, 2, 1])
         t.insert([3, 1, 2])
         t.insert([3, 1, 3])
-        csr = csr_from_trie(t, vocab_size=8)
+        csr = CompactCSRTrie.from_trie(t, vocab_size=8)
         assert csr.row_ptrs.tolist() == [0, 2, 3, 4, 5, 7, 7, 7]
         assert csr.stacked_cols_vals[0].tolist() == [1, 3, 2, 1, 1, 2, 3, -1]
         assert csr.stacked_cols_vals[1].tolist() == [1, 2, 3, 4, 5, 6, 7, -1]
@@ -196,12 +196,12 @@ class TestTrie(unittest.TestCase):
     def test_csr_sorted_batch_single_token(self) -> None:
         t = Trie()
         t.insert([42])
-        b = csr_from_sorted_batch(
+        b = CompactCSRTrie.from_sorted_batch(
             lex_sort([[42]]), vocab_size=50, dense_lookup_layers=1
         )
         assert b.dense_mask_by_layer[0].shape == (50,) and b.dense_mask_by_layer[0][42]
         assert_same_edges(
-            csr_from_trie(t, vocab_size=50, dense_lookup_layers=1), b, "[42]"
+            CompactCSRTrie.from_trie(t, vocab_size=50, dense_lookup_layers=1), b, "[42]"
         )
         assert children_of(b, 0) == {42: 1}
         assert children_of(b, 1) == {}
@@ -212,8 +212,8 @@ class TestTrie(unittest.TestCase):
     def test_csr_sorted_batch_linear_chain(self) -> None:
         t = Trie()
         t.insert([1, 2, 3])
-        b = csr_from_sorted_batch(lex_sort([[1, 2, 3]]), vocab_size=8)
-        assert_same_edges(csr_from_trie(t, vocab_size=8), b, "[1,2,3]")
+        b = CompactCSRTrie.from_sorted_batch(lex_sort([[1, 2, 3]]), vocab_size=8)
+        assert_same_edges(CompactCSRTrie.from_trie(t, vocab_size=8), b, "[1,2,3]")
         assert children_of(b, 0) == {1: 1}
         assert children_of(b, 1) == {2: 2}
         assert children_of(b, 2) == {3: 3}
@@ -227,8 +227,12 @@ class TestTrie(unittest.TestCase):
         t = Trie()
         t.insert([1, 2, 3])
         t.insert([1, 2, 7])
-        b = csr_from_sorted_batch(lex_sort([[1, 2, 3], [1, 2, 7]]), vocab_size=8)
-        assert_same_edges(csr_from_trie(t, vocab_size=8), b, "[1,2,3]+[1,2,7]")
+        b = CompactCSRTrie.from_sorted_batch(
+            lex_sort([[1, 2, 3], [1, 2, 7]]), vocab_size=8
+        )
+        assert_same_edges(
+            CompactCSRTrie.from_trie(t, vocab_size=8), b, "[1,2,3]+[1,2,7]"
+        )
         assert children_of(b, 2) == {3: 3, 7: 4}
         assert b.dense_mask_by_layer[1][1, 2] and b.dense_mask_by_layer[1].sum() == 1
         assert b.dense_states[1, 2] == children_of(b, children_of(b, 0)[1])[2]
@@ -238,8 +242,10 @@ class TestTrie(unittest.TestCase):
         t = Trie()
         for s in seqs:
             t.insert(s)
-        b = csr_from_sorted_batch(lex_sort(seqs), vocab_size=8)
-        assert_same_edges(csr_from_trie(t, vocab_size=8), b, "[1,2,1]+[3,1,2]+[3,1,3]")
+        b = CompactCSRTrie.from_sorted_batch(lex_sort(seqs), vocab_size=8)
+        assert_same_edges(
+            CompactCSRTrie.from_trie(t, vocab_size=8), b, "[1,2,1]+[3,1,2]+[3,1,3]"
+        )
         assert children_of(b, 0) == {1: 1, 3: 2}
         assert children_of(b, 4) == {2: 6, 3: 7}
         assert b.dense_mask_by_layer[1][1, 2] and b.dense_mask_by_layer[1][3, 1]
@@ -256,8 +262,10 @@ class TestTrie(unittest.TestCase):
         t = Trie()
         for s in seqs:
             t.insert(s)
-        b = csr_from_sorted_batch(lex_sort(seqs), vocab_size=4)
-        assert_same_edges(csr_from_trie(t, vocab_size=4), b, "zero-token seqs")
+        b = CompactCSRTrie.from_sorted_batch(lex_sort(seqs), vocab_size=4)
+        assert_same_edges(
+            CompactCSRTrie.from_trie(t, vocab_size=4), b, "zero-token seqs"
+        )
         assert 0 in children_of(b, 0)
         assert 2 in children_of(b, 0)
         assert (
@@ -276,8 +284,8 @@ class TestTrie(unittest.TestCase):
     def test_csr_sorted_batch_matches_trie(self) -> None:
         ids_sorted = torch.tensor(sorted(self.semantic_ids.tolist()), dtype=torch.long)
         trie_rand = build_trie(ids_sorted)
-        csr_t = csr_from_trie(trie_rand, vocab_size=8)
-        csr_b = csr_from_sorted_batch(ids_sorted, vocab_size=8)
+        csr_t = CompactCSRTrie.from_trie(trie_rand, vocab_size=8)
+        csr_b = CompactCSRTrie.from_sorted_batch(ids_sorted, vocab_size=8)
         assert csr_b.dense_mask_by_layer[1].dtype == torch.bool
         assert csr_b.dense_mask_by_layer[1][ids_sorted[:, 0], ids_sorted[:, 1]].all()
         assert (csr_b.dense_states[ids_sorted[:, 0], ids_sorted[:, 1]] > 0).all()

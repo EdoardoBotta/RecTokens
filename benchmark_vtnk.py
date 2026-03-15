@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 
-from rectokens.decoding.csr import csr_from_sorted_batch
+from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 from rectokens.decoding.vntk import vtnk_pytorch, sparse_linear_pytorch
 from rectokens.ops.constrained_node_transition import (
     constrained_node_transition,
@@ -35,7 +35,7 @@ def lex_sort(rows: list[list[int]]) -> torch.Tensor:
 
 def make_csr(vocab_size: int, max_branches: int) -> object:
     seqs = [[i] for i in range(max_branches)]
-    csr = csr_from_sorted_batch(lex_sort(seqs), vocab_size=vocab_size)
+    csr = CompactCSRTrie.from_sorted_batch(lex_sort(seqs), vocab_size=vocab_size)
     return csr._replace(
         row_ptrs=csr.row_ptrs.to(DEVICE),
         stacked_cols_vals=csr.stacked_cols_vals.to(DEVICE),

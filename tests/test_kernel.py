@@ -7,8 +7,7 @@ import torch
 if not torch.cuda.is_available():
     raise unittest.SkipTest("CUDA required")
 
-from rectokens.decoding.csr import csr_from_sorted_batch
-from rectokens.decoding.csr import CompactCSRTrie
+from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 from rectokens.decoding.vntk import vtnk_pytorch
 from rectokens.ops.constrained_node_transition import (
     constrained_node_transition,
@@ -29,7 +28,9 @@ class TestKernel(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         seqs_small = [[1, 2, 1], [3, 1, 2], [3, 1, 3]]
-        csr = csr_from_sorted_batch(lex_sort(seqs_small), vocab_size=VOCAB_SIZE)
+        csr = CompactCSRTrie.from_sorted_batch(
+            lex_sort(seqs_small), vocab_size=VOCAB_SIZE
+        )
         cls.csr_small = csr._replace(
             row_ptrs=csr.row_ptrs.to(DEVICE),
             stacked_cols_vals=csr.stacked_cols_vals.to(DEVICE),
@@ -38,7 +39,7 @@ class TestKernel(unittest.TestCase):
         )
 
         seqs_dense = [[i, j, k] for i in range(4) for j in range(4) for k in range(4)]
-        csr2 = csr_from_sorted_batch(lex_sort(seqs_dense), vocab_size=16)
+        csr2 = CompactCSRTrie.from_sorted_batch(lex_sort(seqs_dense), vocab_size=16)
         cls.csr_dense = csr2._replace(
             row_ptrs=csr2.row_ptrs.to(DEVICE),
             stacked_cols_vals=csr2.stacked_cols_vals.to(DEVICE),

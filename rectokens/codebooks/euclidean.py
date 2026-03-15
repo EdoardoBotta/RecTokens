@@ -4,11 +4,7 @@ import torch
 import torch.nn as nn
 
 from rectokens.core.codebook import Codebook, SearchResult
-
-IS_GPU_AVAILABLE = torch.cuda.is_available()
-
-if IS_GPU_AVAILABLE:
-    from rectokens.kernels.nn_quantize import nearest_neighbor_quantize
+from rectokens.ops.nn_quantize import nearest_neighbor_quantize
 
 
 class EuclideanCodebook(Codebook):
@@ -94,11 +90,7 @@ class EuclideanCodebook(Codebook):
         # Cast to the codebook dtype — MPS requires both operands of matmul
         # to share the same dtype as the accumulator.
         query = query.to(self.embeddings.dtype)
-        codes = (
-            nearest_neighbor_quantize(query, self.embeddings)
-            if query.is_cuda
-            else torch.cdist(query, self.embeddings).min(-1)[1]
-        )
+        codes = nearest_neighbor_quantize(query, self.embeddings)
         return SearchResult(codes=codes)
 
     def update(self, codes: torch.Tensor, embeddings: torch.Tensor) -> None:
