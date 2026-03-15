@@ -8,6 +8,7 @@ Grid: B (batch size) × N (vocab / logits size). K (hidden dim) fixed.
 """
 
 import os
+import time
 import torch
 import torch.nn as nn
 import triton.testing as testing
@@ -18,6 +19,7 @@ import pandas as pd
 from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 from rectokens.schemas.state import ConstraintState
 from rectokens.decoding.vntk import vtnk_pytorch, sparse_linear_pytorch
+from rectokens.decoding.trie import Trie, TrieNode
 from rectokens.ops.constrained_node_transition import (
     constrained_node_transition,
     fused_linear_constrained_node_transition,
@@ -45,8 +47,50 @@ def make_csr(vocab_size: int, max_branches: int) -> object:
     )
 
 
+def make_trie(max_branches: int) -> tuple[Trie, list[TrieNode]]:
+    """Build a Trie and return it along with a BFS-ordered node list for integer indexing."""
+    trie = Trie()
+    for i in range(max_branches):
+        trie.insert([i])
+    # BFS node list so that node index 0 == root (matching cur_node convention)
+    nodes: list[TrieNode] = []
+    queue = [trie.root]
+    while queue:
+        node = queue.pop(0)
+        nodes.append(node)
+        for child in node.children.values():
+            queue.append(child)
+    return trie, nodes
+
+
+def trie_cpu_traversal(
+    cur_node_cpu: torch.Tensor, nodes: list[TrieNode], vocab_size: int
+) -> torch.Tensor:
+    """For each batch item, collect allowed next tokens by walking the CPU trie."""
+    B = cur_node_cpu.shape[0]
+    mask = torch.zeros(B, vocab_size, dtype=torch.bool)
+    for i in range(B):
+        node = nodes[cur_node_cpu[i].item()]
+        for tok in node.children:
+            mask[i, tok] = True
+    return mask
+
+
 def run_bench(fn):
     return testing.do_bench(fn, warmup=WARMUP, rep=REP)
+
+
+def run_bench_cpu(fn, warmup: int = WARMUP, rep: int = REP) -> float:
+    """Wall-clock benchmark for CPU-only functions (ms)."""
+    for _ in range(warmup):
+        fn()
+    times = []
+    for _ in range(rep):
+        t0 = time.perf_counter()
+        fn()
+        times.append((time.perf_counter() - t0) * 1e3)
+    times.sort()
+    return float(sum(times[: max(1, rep // 2)]) / max(1, rep // 2))
 
 
 def benchmark_grid(B_vals, N_vals):
@@ -57,6 +101,7 @@ def benchmark_grid(B_vals, N_vals):
             print(f"  B={B:6d}  N={N:6d}")
 
             csr = make_csr(vocab_size=N, max_branches=MAX_BRANCHES)
+            _, trie_nodes = make_trie(max_branches=MAX_BRANCHES)
 
             # Inputs
             a = torch.randn(B, K, device=DEVICE)
@@ -64,6 +109,7 @@ def benchmark_grid(B_vals, N_vals):
                 N, K, device=DEVICE
             )  # nn.Linear weight shape (out, in)
             cur_node = torch.zeros(B, dtype=torch.long, device=DEVICE)
+            cur_node_cpu = cur_node.cpu()
 
             # compiled linear (shared across fn2 and fn3)
             linear = torch.compile(nn.Linear(K, N, bias=False).to(DEVICE))
@@ -98,6 +144,9 @@ def benchmark_grid(B_vals, N_vals):
                         a, weight, cur_node, csr, step=0
                     )
                 )
+            ms_trie_cpu = run_bench_cpu(
+                lambda: trie_cpu_traversal(cur_node_cpu, trie_nodes, N)
+            )
 
             records.append(
                 {
@@ -107,9 +156,11 @@ def benchmark_grid(B_vals, N_vals):
                     "ms_kernel": ms_kernel,
                     "ms_pytorch": ms_pytorch,
                     "ms_sparse_pytorch": ms_sparse_pytorch,
+                    "ms_trie_cpu": ms_trie_cpu,
                     "speedup_fused_vs_kernel": ms_kernel / ms_fused,
                     "speedup_fused_vs_pytorch": ms_pytorch / ms_fused,
                     "speedup_fused_vs_sparse_pytorch": ms_sparse_pytorch / ms_fused,
+                    "speedup_fused_vs_trie_cpu": ms_trie_cpu / ms_fused,
                 }
             )
 
@@ -162,9 +213,11 @@ if __name__ == "__main__":
                 "ms_kernel",
                 "ms_pytorch",
                 "ms_sparse_pytorch",
+                "ms_trie_cpu",
                 "speedup_fused_vs_kernel",
                 "speedup_fused_vs_pytorch",
                 "speedup_fused_vs_sparse_pytorch",
+                "speedup_fused_vs_trie_cpu",
             ]
         ].to_string(index=False)
     )
@@ -188,5 +241,12 @@ if __name__ == "__main__":
         value_col="speedup_fused_vs_sparse_pytorch",
         title=f"Fused speedup vs sparse_linear_pytorch  (K={K})",
         filename="out/heatmap_fused_vs_sparse_pytorch.jpg",
+        cbar_label="Speedup (>1 = fused faster)",
+    )
+    plot_heatmap(
+        df,
+        value_col="speedup_fused_vs_trie_cpu",
+        title=f"Fused speedup vs CPU trie traversal  (K={K})",
+        filename="out/heatmap_fused_vs_trie_cpu.jpg",
         cbar_label="Speedup (>1 = fused faster)",
     )
