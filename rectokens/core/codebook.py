@@ -34,12 +34,6 @@ class Codebook(nn.Module):
         """Number of discrete codes in the codebook."""
         ...
 
-    @property
-    @abstractmethod
-    def dim(self) -> int:
-        """Embedding dimension of each code."""
-        ...
-
     @abstractmethod
     def lookup(self, codes: torch.Tensor) -> torch.Tensor:
         """Return embeddings for the given code indices.

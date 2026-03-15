@@ -1,26 +1,16 @@
 import torch
 import torch.nn.functional as F
-from rectokens.decoding.schemas.compact_csr_trie import CompactCSRTrie
-from rectokens.decoding.kernels.vtnk import constrained_node_transition
+from rectokens.schemas.compact_csr_trie import CompactCSRTrie
+from rectokens.schemas.state import ConstrainedGenerationState
+from rectokens.schemas.state import ConstraintState
+from rectokens.schemas.state import GenerationState
+from rectokens.ops.constrained_node_transition import constrained_node_transition
+from rectokens.ops.constrained_node_transition import fused_linear_constrained_node_transition
+from rectokens.modules.constrained_linear import ConstrainedLinear
+from rectokens.modules.constraint_enforcer import ConstraintEnforcer
 from typing import NamedTuple
 from typing import Optional
 from torch import nn
-
-
-class GenerationState(NamedTuple):
-    generated_ids: torch.Tensor
-    kv_cache: dict[int, torch.Tensor]
-    log_probas: Optional[torch.Tensor]
-
-
-class ConstraintState(NamedTuple):
-    trie: CompactCSRTrie
-    cur_node: Optional[torch.Tensor]
-
-
-class ConstrainedGenerationState(NamedTuple):
-    generation_state: Optional[GenerationState]
-    constraint_state: Optional[ConstraintState]
 
 
 class ModelInferenceOutput(NamedTuple):
@@ -32,36 +22,106 @@ class RandomModel(nn.Module):
     def __init__(self, vocab_size, hidden_size):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, hidden_size)
-        self.linear = nn.Linear(hidden_size, vocab_size)
+        self.linear = nn.Linear(hidden_size, vocab_size, bias=False)
 
     def forward(self, input_ids, kv_cache=None):
         x = self.embedding(input_ids)
-        logits = self.linear(x)
-        return ModelInferenceOutput(logits=logits[:, -1], kv_cache=None)
+        hidden = x[:, -1]
+        logits = self.linear(hidden)
+        return ModelInferenceOutput(logits=logits, kv_cache=None)
+
+
+
+@torch.inference_mode()
+def autoregressive_generate(
+    model: nn.Module,
+    trie: CompactCSRTrie,
+    input_ids: torch.Tensor,
+    seq_len: int,
+    vocab_size: int,
+    attr_path: Optional[str] = None,
+    temperature: float = 1.0,
+    k: int = 1,
+    beam_size: int = 1,
+) -> torch.Tensor:
+    """
+    Run constrained autoregressive generation for `seq_len` steps.
+
+    When `attr_path` is given, a ConstraintEnforcer is created and applied to
+    the model before generation, replacing the output projection at that path
+    with a ConstrainedLinear in-place.
+
+    Returns:
+        generated_ids: (B, k, seq_len) tensor of generated token ids.
+    """
+    if attr_path is not None:
+        ConstraintEnforcer(attr_path).convert(model)
+
+    state = ConstrainedGenerationState(
+        generation_state=None,
+        constraint_state=ConstraintState(trie=trie, cur_node=None),
+    )
+
+    for step in range(seq_len):
+        state = decode_one_step(
+            constrained_generation_state=state,
+            model_fwd=model,
+            input_ids=input_ids,
+            step=step,
+            vocab_size=vocab_size,
+            temperature=temperature,
+            k=k,
+            beam_size=beam_size,
+        )
+        gen = state.generation_state.generated_ids  # (B, k, step+1)
+        input_ids = gen.reshape(-1, gen.shape[-1])[:, -1:]  # (B*k, 1)
+
+    return state.generation_state.generated_ids
+
+
+def _reindex_kv_cache(
+    kv_cache: Optional[dict], indices: torch.Tensor
+) -> Optional[dict]:
+    if kv_cache is None:
+        return None
+    return {layer: tensor[indices] for layer, tensor in kv_cache.items()}
 
 
 @torch.inference_mode()
 def decode_one_step(
-    constrained_generation_state,
-    model_fwd,
-    input_ids,
-    step,
-    vocab_size,
-    temperature=1.0,
-    k=1,
-    beam_size=1,
-):
+    constrained_generation_state: ConstrainedGenerationState,
+    model_fwd: nn.Module,
+    input_ids: torch.Tensor,
+    step: int,
+    vocab_size: int,
+    temperature: float = 1.0,
+    k: int = 1,
+    beam_size: int = 1,
+) -> ConstrainedGenerationState:
     assert input_ids.ndim == 2  # (B, seq_len) on step 0, (B*k, 1) on subsequent steps
 
     trie = constrained_generation_state.constraint_state.trie
     generation_state = constrained_generation_state.generation_state
     is_first_step = generation_state is None
 
-    kv_cache = generation_state.kv_cache if not is_first_step else None
-    log_probas = generation_state.log_probas if not is_first_step else None
+    if is_first_step:
+        kv_cache, log_probas = None, None
+    else:
+        kv_cache = generation_state.kv_cache
+        log_probas = generation_state.log_probas
+
+    constrained_linear = next(
+        (m for m in model_fwd.modules() if isinstance(m, ConstrainedLinear)), None
+    ) if isinstance(model_fwd, nn.Module) else None
+
+    if constrained_linear is not None and step >= len(trie.dense_mask_by_layer):
+        cur_node = constrained_generation_state.constraint_state.cur_node
+        constrained_linear.set_context(cur_node, trie, step)
 
     model_output = model_fwd(input_ids, kv_cache)
     logits = model_output.logits
+    if constrained_linear is not None:
+        constrained_linear.clear_context()
 
     assert logits.ndim == 2  # (B or B*k, vocab_size)
 
@@ -75,22 +135,28 @@ def decode_one_step(
     )
 
     next_node = None
+    next_nodes = None
+    valid_idxs = None
     if step < len(trie.dense_mask_by_layer):
         layer_mask = trie.dense_mask_by_layer[step]
-        if step > 0:
+        if is_first_step:
+            layer_mask = layer_mask.unsqueeze(0).expand(current_batch_size, -1)
+        else:
             assert prev_generated_ids_flat is not None
             layer_mask = layer_mask[prev_generated_ids_flat.unbind(-1)]
-        else:
-            layer_mask = layer_mask.unsqueeze(0).expand(current_batch_size, -1)
         logits[~layer_mask] = float("-inf")
     else:
-        next_nodes, valid_idxs, logits = constrained_node_transition(
-            logits,
-            cur_node=constrained_generation_state.constraint_state.cur_node,
-            constraint_transitions=trie,
-            step=step,
-            vocab_size=vocab_size,
-        )
+        cur_node = constrained_generation_state.constraint_state.cur_node
+        if constrained_linear is not None:
+            next_nodes, valid_idxs = constrained_linear.next_nodes, constrained_linear.valid_idxs
+        else:
+            next_nodes, valid_idxs, logits = constrained_node_transition(
+                logits,
+                cur_node=cur_node,
+                constraint_transitions=trie,
+                step=step,
+                vocab_size=vocab_size,
+            )
 
     probas_batched = F.softmax(logits / temperature, dim=-1)
     # Sample beam_size candidates per current beam: (current_batch, beam_size)
@@ -111,12 +177,8 @@ def decode_one_step(
         flat_parent_ids = torch.arange(B, device=input_ids.device).repeat_interleave(k)
 
         # Expand kv_cache to match the new B*k batch size
-        new_kv_cache = model_output.kv_cache
-        if new_kv_cache is not None:
-            new_kv_cache = {
-                layer: tensor.repeat_interleave(k, dim=0)
-                for layer, tensor in new_kv_cache.items()
-            }
+        expand_ids = torch.arange(B, device=input_ids.device).repeat_interleave(k)
+        new_kv_cache = _reindex_kv_cache(model_output.kv_cache, expand_ids)
     else:
         assert log_probas is not None
         # Accumulate log-probas across beams: (B, k*beam_size)
@@ -145,12 +207,7 @@ def decode_one_step(
         new_log_probas = top_k_log_probas.reshape(B * k)
 
         # Reorder kv_cache to match selected parent beams
-        new_kv_cache = model_output.kv_cache
-        if new_kv_cache is not None:
-            new_kv_cache = {
-                layer: tensor[flat_parent_ids]
-                for layer, tensor in new_kv_cache.items()
-            }
+        new_kv_cache = _reindex_kv_cache(model_output.kv_cache, flat_parent_ids)
 
     if step == len(trie.dense_mask_by_layer) - 1:
         # dense_states is indexed by the full token path; works per-beam since each

@@ -1,7 +1,7 @@
 import torch
 from collections import deque
 from rectokens.decoding.trie import Trie
-from rectokens.decoding.schemas.compact_csr_trie import CompactCSRTrie
+from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 from typing import NamedTuple
 
 

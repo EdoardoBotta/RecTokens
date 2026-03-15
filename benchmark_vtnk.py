@@ -17,7 +17,7 @@ import pandas as pd
 
 from rectokens.decoding.csr import csr_from_sorted_batch
 from rectokens.decoding.vntk import vtnk_pytorch, sparse_linear_pytorch
-from rectokens.decoding.kernels.vtnk import (
+from rectokens.ops.constrained_node_transition import (
     constrained_node_transition,
     fused_linear_constrained_node_transition,
 )

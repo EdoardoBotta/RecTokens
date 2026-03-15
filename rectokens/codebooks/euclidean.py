@@ -38,7 +38,6 @@ class EuclideanCodebook(Codebook):
     def __init__(self, size: int, dim: int, *, learnable: bool = False) -> None:
         super().__init__()
         self._size = size
-        self._dim = dim
         embeddings = torch.zeros(size, dim)
         if learnable:
             self.embeddings = nn.Parameter(embeddings)
@@ -66,10 +65,6 @@ class EuclideanCodebook(Codebook):
     @property
     def size(self) -> int:
         return self._size
-
-    @property
-    def dim(self) -> int:
-        return self._dim
 
     def lookup(self, codes: torch.Tensor) -> torch.Tensor:
         """Return embeddings for the given code indices.
@@ -101,7 +96,7 @@ class EuclideanCodebook(Codebook):
         query = query.to(self.embeddings.dtype)
         codes = (
             nearest_neighbor_quantize(query, self.embeddings)
-            if IS_GPU_AVAILABLE
+            if query.is_cuda
             else torch.cdist(query, self.embeddings).min(-1)[1]
         )
         return SearchResult(codes=codes)
