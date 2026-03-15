@@ -14,6 +14,7 @@ from rectokens.ops.constrained_node_transition import (
     constrained_node_transition,
     fused_linear_constrained_node_transition,
 )
+from rectokens.schemas.state import ConstraintState
 
 
 DEVICE = torch.device("cuda")
@@ -60,9 +61,10 @@ class TestKernel(unittest.TestCase):
             else torch.tensor(cur_node_vals, device=DEVICE)
         )
         ref_nn, ref_vi, ref_cl = vtnk_pytorch(logits, cur_node, self.csr_small, step)
-        ker_nn, ker_vi, ker_cl = constrained_node_transition(
-            logits, cur_node, self.csr_small, step, VOCAB_SIZE
+        constraint_state = ConstraintState(
+            step=step, trie=self.csr_small, cur_node=cur_node
         )
+        ker_nn, ker_vi, ker_cl = constrained_node_transition(logits, constraint_state)
         assert ker_nn.shape == ref_nn.shape
         assert ker_vi.shape == ref_vi.shape
         assert ker_cl.shape == ref_cl.shape
@@ -75,9 +77,10 @@ class TestKernel(unittest.TestCase):
     ) -> None:
         cur_node = torch.tensor(cur_node_vals, device=DEVICE)
         dummy_logits = torch.zeros(len(cur_node_vals), VOCAB_SIZE, device=DEVICE)
-        _, vi, _ = constrained_node_transition(
-            dummy_logits, cur_node, self.csr_small, step, VOCAB_SIZE
+        constraint_state = ConstraintState(
+            step=step, trie=self.csr_small, cur_node=cur_node
         )
+        _, vi, _ = constrained_node_transition(dummy_logits, constraint_state)
         for b, expected in enumerate(expected_per_batch):
             actual = sorted(vi[b][vi[b] >= 0].tolist())
             assert actual == sorted(expected)
@@ -95,8 +98,11 @@ class TestKernel(unittest.TestCase):
         ref_nn, ref_vi, ref_cl = vtnk_pytorch(
             ref_logits, cur_node, self.csr_small, step
         )
+        constraint_state = ConstraintState(
+            step=step, trie=self.csr_small, cur_node=cur_node
+        )
         ker_nn, ker_vi, ker_cl = fused_linear_constrained_node_transition(
-            a, b, cur_node, self.csr_small, step
+            a, b, constraint_state
         )
         assert ker_nn.shape == ref_nn.shape
         assert ker_vi.shape == ref_vi.shape
@@ -134,9 +140,10 @@ class TestKernel(unittest.TestCase):
         logits = torch.randn(B, vocab_size, device=DEVICE)
         cur_node = torch.zeros(B, dtype=torch.long, device=DEVICE)
         ref_nn, ref_vi, ref_cl = vtnk_pytorch(logits, cur_node, self.csr_dense, step=0)
-        ker_nn, ker_vi, ker_cl = constrained_node_transition(
-            logits, cur_node, self.csr_dense, step=0, vocab_size=vocab_size
+        constraint_state = ConstraintState(
+            step=0, trie=self.csr_dense, cur_node=cur_node
         )
+        ker_nn, ker_vi, ker_cl = constrained_node_transition(logits, constraint_state)
         assert torch.equal(ker_nn, ref_nn)
         assert torch.equal(ker_vi, ref_vi)
         assert torch.allclose(ker_cl, ref_cl, equal_nan=True)
@@ -155,9 +162,10 @@ class TestKernel(unittest.TestCase):
         ref_nn, ref_vi, ref_cl = vtnk_pytorch(
             logits, next_nodes, self.csr_dense, step=1
         )
-        ker_nn, ker_vi, ker_cl = constrained_node_transition(
-            logits, next_nodes, self.csr_dense, step=1, vocab_size=vocab_size
+        constraint_state = ConstraintState(
+            step=1, trie=self.csr_dense, cur_node=next_nodes
         )
+        ker_nn, ker_vi, ker_cl = constrained_node_transition(logits, constraint_state)
         assert torch.equal(ker_nn, ref_nn)
         assert torch.equal(ker_vi, ref_vi)
         assert torch.allclose(ker_cl, ref_cl, equal_nan=True)

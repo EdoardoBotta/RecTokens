@@ -14,6 +14,7 @@ from rectokens.schemas.state import (
     ConstraintState,
     GenerationState,
 )
+from rectokens.schemas.config import GenerationConfig
 from rectokens.decoding.constrained_decoding import (
     ModelInferenceOutput,
     RandomModel,
@@ -67,18 +68,14 @@ class _ModelWithKVCache(nn.Module):
 
 def _run_beam_loop(trie, model, input_ids, vocab_size, seq_len, k, beam_size):
     state = ConstrainedGenerationState(
-        generation_state=None,
-        constraint_state=ConstraintState(trie=trie, cur_node=None),
+        generation_config=GenerationConfig(steps=seq_len, k=k, beam_size=beam_size),
+        constraint_state=ConstraintState(step=0, trie=trie, cur_node=None),
     )
-    for step in range(seq_len):
+    for _ in range(seq_len):
         state = decode_one_step(
             constrained_generation_state=state,
             model_fwd=model,
             input_ids=input_ids,
-            step=step,
-            vocab_size=vocab_size,
-            k=k,
-            beam_size=beam_size,
         )
         gen = state.generation_state.generated_ids
         input_ids = gen.reshape(-1, gen.shape[-1])[:, -1:]
@@ -96,15 +93,13 @@ class TestConstrainedDecoding(unittest.TestCase):
         input_ids = torch.randint(0, vocab_size, (B, seq_len), device=device)
 
         init_state = ConstrainedGenerationState(
-            generation_state=None,
-            constraint_state=ConstraintState(trie=trie, cur_node=None),
+            generation_config=GenerationConfig(steps=1, k=1, beam_size=1),
+            constraint_state=ConstraintState(step=0, trie=trie, cur_node=None),
         )
         result = decode_one_step(
             constrained_generation_state=init_state,
             model_fwd=model,
             input_ids=input_ids,
-            step=0,
-            vocab_size=vocab_size,
         )
         assert isinstance(result, ConstrainedGenerationState)
 
@@ -119,16 +114,14 @@ class TestConstrainedDecoding(unittest.TestCase):
         input_ids = torch.randint(0, vocab_size, (B, seq_len), device=device)
 
         state = ConstrainedGenerationState(
-            generation_state=None,
-            constraint_state=ConstraintState(trie=trie, cur_node=None),
+            generation_config=GenerationConfig(steps=sem_ids_length, k=1, beam_size=1),
+            constraint_state=ConstraintState(step=0, trie=trie, cur_node=None),
         )
         for step in range(sem_ids_length):
             state = decode_one_step(
                 constrained_generation_state=state,
                 model_fwd=model,
                 input_ids=input_ids,
-                step=step,
-                vocab_size=vocab_size,
             )
             assert isinstance(state, ConstrainedGenerationState)
             assert state.generation_state is not None
@@ -149,18 +142,16 @@ class TestConstrainedDecoding(unittest.TestCase):
         input_ids = torch.randint(0, vocab_size, (B, seq_len), device=device)
 
         state = ConstrainedGenerationState(
-            generation_state=None,
-            constraint_state=ConstraintState(trie=trie, cur_node=None),
+            generation_config=GenerationConfig(
+                steps=len(SEQS_5[0]), k=k, beam_size=beam_size
+            ),
+            constraint_state=ConstraintState(step=0, trie=trie, cur_node=None),
         )
         for step in range(len(SEQS_5[0])):
             state = decode_one_step(
                 constrained_generation_state=state,
                 model_fwd=model,
                 input_ids=input_ids,
-                step=step,
-                vocab_size=vocab_size,
-                k=k,
-                beam_size=beam_size,
             )
             gen = state.generation_state
             assert gen.generated_ids.shape == (B, k, step + 1)
@@ -237,8 +228,10 @@ class TestConstrainedDecoding(unittest.TestCase):
         input_ids = torch.randint(0, vocab_size, (B, seq_len), device=device)
 
         state = ConstrainedGenerationState(
-            generation_state=None,
-            constraint_state=ConstraintState(trie=trie, cur_node=None),
+            generation_config=GenerationConfig(
+                steps=len(SEQS_5[0]), k=k, beam_size=beam_size
+            ),
+            constraint_state=ConstraintState(step=0, trie=trie, cur_node=None),
         )
         prev_max = 0.0
         for step in range(len(SEQS_5[0])):
@@ -246,10 +239,6 @@ class TestConstrainedDecoding(unittest.TestCase):
                 constrained_generation_state=state,
                 model_fwd=model,
                 input_ids=input_ids,
-                step=step,
-                vocab_size=vocab_size,
-                k=k,
-                beam_size=beam_size,
             )
             lp = state.generation_state.log_probas
             assert (lp <= 0).all()
@@ -269,18 +258,16 @@ class TestConstrainedDecoding(unittest.TestCase):
         input_ids = torch.randint(0, vocab_size, (B, seq_len), device=device)
 
         state = ConstrainedGenerationState(
-            generation_state=None,
-            constraint_state=ConstraintState(trie=trie, cur_node=None),
+            generation_config=GenerationConfig(
+                steps=len(SEQS_5[0]), k=k, beam_size=beam_size
+            ),
+            constraint_state=ConstraintState(step=0, trie=trie, cur_node=None),
         )
         for step in range(len(SEQS_5[0])):
             state = decode_one_step(
                 constrained_generation_state=state,
                 model_fwd=model,
                 input_ids=input_ids,
-                step=step,
-                vocab_size=vocab_size,
-                k=k,
-                beam_size=beam_size,
             )
             kv = state.generation_state.kv_cache
             assert kv is not None

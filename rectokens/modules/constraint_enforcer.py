@@ -1,11 +1,11 @@
-from rectokens.modules.constrained_linear import ConstrainedLinear
+from rectokens.modules.sparse_linear import SparseLinear
 from typing import Optional
 from torch import nn
 
 
 class ConstraintEnforcer(nn.Module):
     """
-    Wraps a model and replaces its output projection with a ConstrainedLinear.
+    Wraps a model and replaces its output projection with a SparseLinear.
 
     Args:
         attr_path: Dotted path to the output projection layer, e.g. "lm_head".
@@ -14,18 +14,16 @@ class ConstraintEnforcer(nn.Module):
     def __init__(self, attr_path: str):
         super().__init__()
         self.attr_path = attr_path
-        self.constrained_linear: Optional[ConstrainedLinear] = None
+        self.constrained_linear: Optional[SparseLinear] = None
 
     @classmethod
-    def convert_to_constrained_linear(
-        cls, model: nn.Module, attr_path: str
-    ) -> ConstrainedLinear:
+    def convert_to_sparse_linear(cls, model: nn.Module, attr_path: str) -> SparseLinear:
         """
-        Replace the output projection layer at `attr_path` with a ConstrainedLinear.
+        Replace the output projection layer at `attr_path` with a SparseLinear.
 
         Navigates the dotted attribute path to find the parent module and target
         attribute, validates the layer is a bias-free nn.Linear, then swaps it
-        in-place.  Returns the ConstrainedLinear that was inserted.
+        in-place.  Returns the SparseLinear that was inserted.
 
         Args:
             model:     The model to modify in-place.
@@ -33,7 +31,7 @@ class ConstraintEnforcer(nn.Module):
                        "model.embed_out".
 
         Returns:
-            The ConstrainedLinear now installed at attr_path.
+            The SparseLinear now installed at attr_path.
 
         Raises:
             AttributeError: If any component of attr_path does not exist.
@@ -53,19 +51,17 @@ class ConstraintEnforcer(nn.Module):
                 f"Expected nn.Linear at '{attr_path}', got {type(linear).__name__}"
             )
 
-        constrained = ConstrainedLinear(linear)
+        constrained = SparseLinear(linear)
         setattr(parent, attr_name, constrained)
         return constrained
 
-    def convert(self, model: nn.Module) -> nn.Module:
-        """Replace the output projection in `model` with a ConstrainedLinear in-place."""
-        self.constrained_linear = self.convert_to_constrained_linear(
-            model, self.attr_path
-        )
+    def prepare(self, model: nn.Module) -> nn.Module:
+        """Replace the output projection in `model` with a SparseLinear in-place."""
+        self.constrained_linear = self.convert_to_sparse_linear(model, self.attr_path)
         return model
 
     def forward(self, *args, **kwargs):
         raise NotImplementedError(
-            "ConstraintEnforcer is not a forward model; call .convert() to prepare a model "
+            "ConstraintEnforcer is not a forward model; call .prepare() to prepare a model "
             "then pass it to autoregressive_generate."
         )

@@ -59,6 +59,7 @@ def csr_from_trie(
         layer_max_branches=layer_max_branches,
         dense_mask_by_layer=dense_mask_by_layer,
         dense_states=dense_states,
+        vocab_size=vocab_size,
     )
 
 
@@ -138,4 +139,5 @@ def csr_from_sorted_batch(
         layer_max_branches=layer_max_branches,
         dense_mask_by_layer=dense_mask_by_layer,
         dense_states=dense_states,
+        vocab_size=vocab_size,
     )

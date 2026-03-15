@@ -15,7 +15,6 @@ def _constrained_node_transition_op(
     csr_row_ptrs: torch.Tensor,
     csr_cols_vals: torch.Tensor,
     max_branches: int,
-    vocab_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, N = logits.shape
 

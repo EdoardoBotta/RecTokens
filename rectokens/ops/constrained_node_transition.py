@@ -4,15 +4,13 @@ from rectokens.kernels.constrained_node_transition import (
     _constrained_node_transition_op,
     _fused_linear_constrained_node_transition_op,
 )
-from rectokens.schemas.compact_csr_trie import CompactCSRTrie
+from rectokens.schemas.state import ConstraintState
 
 
 def fused_linear_constrained_node_transition(
     a: torch.Tensor,
     b: torch.Tensor,
-    cur_node: torch.Tensor,
-    constraint_transitions: CompactCSRTrie,
-    step: int,
+    constraint_state: ConstraintState,
     bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -29,24 +27,22 @@ def fused_linear_constrained_node_transition(
     """
     # Use a dummy bias tensor when none is provided; has_bias gates all loads.
     bias_val = bias if bias is not None else a.new_empty(0)
+    step = constraint_state.step
     return _fused_linear_constrained_node_transition_op(
         a,
         b,
         bias_val,
-        cur_node,
-        constraint_transitions.row_ptrs,
-        constraint_transitions.stacked_cols_vals,
-        constraint_transitions.layer_max_branches[step],
+        constraint_state.cur_node,
+        constraint_state.trie.row_ptrs,
+        constraint_state.trie.stacked_cols_vals,
+        constraint_state.trie.layer_max_branches[step],
         bias is not None,
     )
 
 
 def constrained_node_transition(
     logits: torch.Tensor,
-    cur_node: torch.Tensor,
-    constraint_transitions: CompactCSRTrie,
-    step: int,
-    vocab_size: int,
+    constraint_state: ConstraintState,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Constrained node transition — GPU Triton kernel with CPU fallback.
@@ -56,12 +52,12 @@ def constrained_node_transition(
       valid_idxs:       (B, max_branches) int64 — valid token indices, -1 for padding
       corrected_logits: (B, vocab_size)  float  — logits zeroed for invalid tokens
     """
-    max_branches = constraint_transitions.layer_max_branches[step]
+    step, trie = constraint_state.step, constraint_state.trie
+    max_branches = trie.layer_max_branches[step]
     return _constrained_node_transition_op(
         logits,
-        cur_node,
-        constraint_transitions.row_ptrs,
-        constraint_transitions.stacked_cols_vals,
+        constraint_state.cur_node,
+        trie.row_ptrs,
+        trie.stacked_cols_vals,
         max_branches,
-        vocab_size,
     )

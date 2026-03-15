@@ -1,5 +1,6 @@
 import torch
 from rectokens.schemas.compact_csr_trie import CompactCSRTrie
+from rectokens.schemas.config import GenerationConfig
 from typing import NamedTuple
 from typing import Optional
 
@@ -11,10 +12,12 @@ class GenerationState(NamedTuple):
 
 
 class ConstraintState(NamedTuple):
+    step: int
     trie: CompactCSRTrie
     cur_node: Optional[torch.Tensor]
 
 
 class ConstrainedGenerationState(NamedTuple):
-    generation_state: Optional[GenerationState]
-    constraint_state: Optional[ConstraintState]
+    generation_config: GenerationConfig
+    constraint_state: ConstraintState
+    generation_state: Optional[GenerationState] = None

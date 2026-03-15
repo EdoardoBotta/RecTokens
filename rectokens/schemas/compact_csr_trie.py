@@ -8,3 +8,4 @@ class CompactCSRTrie(NamedTuple):
     layer_max_branches: list[int]
     dense_mask_by_layer: list[Tensor]
     dense_states: Tensor
+    vocab_size: int

@@ -1,14 +1,12 @@
 import torch
 import torch.nn.functional as F
 from rectokens.schemas.compact_csr_trie import CompactCSRTrie
+from rectokens.schemas.config import GenerationConfig
 from rectokens.schemas.state import ConstrainedGenerationState
 from rectokens.schemas.state import ConstraintState
 from rectokens.schemas.state import GenerationState
 from rectokens.ops.constrained_node_transition import constrained_node_transition
-from rectokens.ops.constrained_node_transition import (
-    fused_linear_constrained_node_transition,
-)
-from rectokens.modules.constrained_linear import ConstrainedLinear
+from rectokens.modules.sparse_linear import SparseLinear
 from rectokens.modules.constraint_enforcer import ConstraintEnforcer
 from typing import NamedTuple
 from typing import Optional
@@ -38,41 +36,33 @@ def autoregressive_generate(
     model: nn.Module,
     trie: CompactCSRTrie,
     input_ids: torch.Tensor,
-    seq_len: int,
-    vocab_size: int,
+    generation_config: GenerationConfig,
     attr_path: Optional[str] = None,
-    temperature: float = 1.0,
-    k: int = 1,
-    beam_size: int = 1,
 ) -> torch.Tensor:
     """
     Run constrained autoregressive generation for `seq_len` steps.
 
     When `attr_path` is given, a ConstraintEnforcer is created and applied to
     the model before generation, replacing the output projection at that path
-    with a ConstrainedLinear in-place.
+    with a SparseLinear in-place.
 
     Returns:
         generated_ids: (B, k, seq_len) tensor of generated token ids.
     """
     if attr_path is not None:
-        ConstraintEnforcer(attr_path).convert(model)
+        ConstraintEnforcer(attr_path).prepare(model)
 
     state = ConstrainedGenerationState(
+        generation_config=generation_config,
         generation_state=None,
-        constraint_state=ConstraintState(trie=trie, cur_node=None),
+        constraint_state=ConstraintState(step=0, trie=trie, cur_node=None),
     )
 
-    for step in range(seq_len):
+    for _ in range(generation_config.steps):
         state = decode_one_step(
             constrained_generation_state=state,
             model_fwd=model,
             input_ids=input_ids,
-            step=step,
-            vocab_size=vocab_size,
-            temperature=temperature,
-            k=k,
-            beam_size=beam_size,
         )
         gen = state.generation_state.generated_ids  # (B, k, step+1)
         input_ids = gen.reshape(-1, gen.shape[-1])[:, -1:]  # (B*k, 1)
@@ -93,17 +83,15 @@ def decode_one_step(
     constrained_generation_state: ConstrainedGenerationState,
     model_fwd: nn.Module,
     input_ids: torch.Tensor,
-    step: int,
-    vocab_size: int,
-    temperature: float = 1.0,
-    k: int = 1,
-    beam_size: int = 1,
 ) -> ConstrainedGenerationState:
     assert input_ids.ndim == 2  # (B, seq_len) on step 0, (B*k, 1) on subsequent steps
 
     trie = constrained_generation_state.constraint_state.trie
     generation_state = constrained_generation_state.generation_state
     is_first_step = generation_state is None
+    step = constrained_generation_state.constraint_state.step
+    config = constrained_generation_state.generation_config
+    k, beam_size = config.k, config.beam_size
 
     if is_first_step:
         kv_cache, log_probas = None, None
@@ -112,14 +100,13 @@ def decode_one_step(
         log_probas = generation_state.log_probas
 
     constrained_linear = (
-        next((m for m in model_fwd.modules() if isinstance(m, ConstrainedLinear)), None)
+        next((m for m in model_fwd.modules() if isinstance(m, SparseLinear)), None)
         if isinstance(model_fwd, nn.Module)
         else None
     )
 
     if constrained_linear is not None and step >= len(trie.dense_mask_by_layer):
-        cur_node = constrained_generation_state.constraint_state.cur_node
-        constrained_linear.set_context(cur_node, trie, step)
+        constrained_linear.set_context(constrained_generation_state.constraint_state)
 
     model_output = model_fwd(input_ids, kv_cache)
     logits = model_output.logits
@@ -148,7 +135,6 @@ def decode_one_step(
             layer_mask = layer_mask[prev_generated_ids_flat.unbind(-1)]
         logits[~layer_mask] = float("-inf")
     else:
-        cur_node = constrained_generation_state.constraint_state.cur_node
         if constrained_linear is not None:
             next_nodes, valid_idxs = (
                 constrained_linear.next_nodes,
@@ -156,14 +142,10 @@ def decode_one_step(
             )
         else:
             next_nodes, valid_idxs, logits = constrained_node_transition(
-                logits,
-                cur_node=cur_node,
-                constraint_transitions=trie,
-                step=step,
-                vocab_size=vocab_size,
+                logits, constraint_state=constrained_generation_state.constraint_state
             )
 
-    probas_batched = F.softmax(logits / temperature, dim=-1)
+    probas_batched = F.softmax(logits / config.temperature, dim=-1)
     # Sample beam_size candidates per current beam: (current_batch, beam_size)
     samples_batched = torch.multinomial(probas_batched, num_samples=beam_size)
     sampled_log_probas = torch.log(
@@ -234,12 +216,14 @@ def decode_one_step(
         next_node = next_nodes_reordered[branch_match]  # (B*k,)
 
     return ConstrainedGenerationState(
+        generation_config=config,
         generation_state=GenerationState(
             generated_ids=generated_ids.reshape(B, k, -1),
             kv_cache=new_kv_cache,
             log_probas=new_log_probas,
         ),
         constraint_state=ConstraintState(
+            step=step + 1,
             trie=trie,
             cur_node=next_node,
         ),
