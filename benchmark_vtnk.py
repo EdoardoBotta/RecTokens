@@ -16,6 +16,7 @@ import seaborn as sns
 import pandas as pd
 
 from rectokens.schemas.compact_csr_trie import CompactCSRTrie
+from rectokens.schemas.state import ConstraintState
 from rectokens.decoding.vntk import vtnk_pytorch, sparse_linear_pytorch
 from rectokens.ops.constrained_node_transition import (
     constrained_node_transition,
@@ -70,16 +71,13 @@ def benchmark_grid(B_vals, N_vals):
                 linear.weight.data.copy_(weight)
 
             sparse_linear_pytorch_compiled = torch.compile(sparse_linear_pytorch)
+            cs = ConstraintState(step=0, trie=csr, cur_node=cur_node)
 
             # --- warmup / force compilation ---
             with torch.no_grad():
-                fused_linear_constrained_node_transition(
-                    a, weight.T, cur_node, csr, step=0
-                )
+                fused_linear_constrained_node_transition(a, weight.T, cs)
                 logits_w = a @ weight.T
-                constrained_node_transition(
-                    logits_w, cur_node, csr, step=0, vocab_size=N
-                )
+                constrained_node_transition(logits_w, cs)
                 vtnk_pytorch(logits_w, cur_node, csr, step=0)
                 linear(a)
                 sparse_linear_pytorch_compiled(a, weight, cur_node, csr, step=0)
@@ -87,14 +85,10 @@ def benchmark_grid(B_vals, N_vals):
             # --- benchmark ---
             with torch.no_grad():
                 ms_fused = run_bench(
-                    lambda: fused_linear_constrained_node_transition(
-                        a, weight.T, cur_node, csr, step=0
-                    )
+                    lambda: fused_linear_constrained_node_transition(a, weight.T, cs)
                 )
                 ms_kernel = run_bench(
-                    lambda: constrained_node_transition(
-                        a @ weight.T, cur_node, csr, step=0, vocab_size=N
-                    )
+                    lambda: constrained_node_transition(a @ weight.T, cs)
                 )
                 ms_pytorch = run_bench(
                     lambda: vtnk_pytorch(linear(a), cur_node, csr, step=0)
