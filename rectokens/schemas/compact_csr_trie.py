@@ -12,6 +12,21 @@ if TYPE_CHECKING:
 
 
 class CompactCSRTrie(NamedTuple):
+    """A trie encoded in Compressed Sparse Row (CSR) format for GPU-accelerated constrained decoding.
+
+    Represents a prefix tree (trie) over valid token sequences as a sparse transition
+    matrix in CSR format, enabling the tree traversal to be expressed as batched tensor
+    operations on hardware accelerators. This avoids the severe latency penalties of
+    pointer-chasing through a conventional trie on GPUs/TPUs.
+
+    Proposed by Su et al. as the STATIC (Sparse Transition Matrix-Accelerated Trie Index
+    for Constrained Decoding) method in:
+
+        "Vectorizing the Trie: Efficient Constrained Decoding for LLM-based Generative
+        Retrieval on Accelerators", Su et al. (2026).
+        https://arxiv.org/abs/2602.22647
+    """
+
     row_ptrs: Tensor
     stacked_cols_vals: Tensor
     layer_max_branches: list[int]
