@@ -26,9 +26,6 @@ With `K` codes per level and `L` levels, the scheme supports `K^L` unique item I
 ```bash
 pip install -e .
 
-# With optional FAISS support for large codebooks
-pip install -e ".[faiss]"
-
 # With development dependencies
 pip install -e ".[dev]"
 ```
@@ -164,6 +161,22 @@ The `benchmark_vtnk.py` script benchmarks constrained decoding implementations a
 python benchmark_vtnk.py
 # Results saved to out/heatmap_*.jpg
 ```
+
+### Speedup Heatmaps
+
+Speedup of the fused Triton kernel relative to each baseline, across batch sizes and vocabulary sizes:
+
+**vs PyTorch (dense)**
+![fused vs pytorch](out/heatmap_fused_vs_pytorch.jpg)
+
+**vs Sparse PyTorch**
+![fused vs sparse pytorch](out/heatmap_fused_vs_sparse_pytorch.jpg)
+
+**vs Custom Kernel**
+![fused vs kernel](out/heatmap_fused_vs_kernel.jpg)
+
+**vs CPU Trie**
+![fused vs cpu trie](out/heatmap_fused_vs_trie_cpu.jpg)
 
 ## Module Structure
 
