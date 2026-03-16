@@ -166,16 +166,16 @@ python benchmark_vtnk.py
 
 Speedup of the fused Triton kernel relative to each baseline, across batch sizes and vocabulary sizes:
 
-**vs PyTorch (dense)**
+**vs PyTorch (dense)** — `torch.compile(nn.Linear)` followed by `vtnk_pytorch`, which applies a validity mask to the logits in a separate GPU pass after the matmul.
 ![fused vs pytorch](out/heatmap_fused_vs_pytorch.jpg)
 
-**vs Sparse PyTorch**
+**vs Sparse PyTorch** — `torch.compile(sparse_linear_pytorch)`, which skips columns corresponding to invalid tokens during the matmul using a sparse weight representation, but remains within the PyTorch runtime.
 ![fused vs sparse pytorch](out/heatmap_fused_vs_sparse_pytorch.jpg)
 
-**vs Custom Kernel**
+**vs Custom Kernel** — `torch.compile(nn.Linear)` followed by `constrained_node_transition`, a standalone Triton kernel that applies the CSR trie mask to precomputed logits. The matmul and masking are still two separate kernel launches.
 ![fused vs kernel](out/heatmap_fused_vs_kernel.jpg)
 
-**vs CPU Trie**
+**vs CPU Trie** — Pure Python traversal of an in-memory `Trie` on CPU, iterating over each batch item to collect valid next tokens. Included as the reference baseline for the constrained decoding problem.
 ![fused vs cpu trie](out/heatmap_fused_vs_trie_cpu.jpg)
 
 ## Module Structure
@@ -203,6 +203,14 @@ rectokens/
 | `ResidualQuantizerOutput` | Multi-level output: `codes` `(B, L)`, `quantized` `(B, D)`, `level_outputs` |
 | `GenerationConfig` | Beam search config: `steps`, `k`, `beam_size`, `temperature` |
 | `CompactCSRTrie` | GPU-resident CSR trie encoding valid item token sequences |
+
+## References
+
+- Rajput et al. **Recommender Systems with Generative Retrieval.** NeurIPS 2023. https://arxiv.org/abs/2305.05065
+
+- Zhou et al. **OneRec Technical Report.** 2025. https://arxiv.org/abs/2506.13695
+
+- Su et al. **Vectorizing the Trie: Efficient Constrained Decoding for LLM-based Generative Retrieval on Accelerators.** 2026. https://arxiv.org/abs/2602.22647
 
 ## License
 
