@@ -301,6 +301,102 @@ At N=64, `quantize_fwd_mm` beats FAISS-GPU at every cell: 2.24–20.28×. The ov
 
 This heatmap is the clearest illustration of `quantize_fwd_mm`'s robustness. While `quantize_fwd` fell below FAISS at N=256, D=256, small B, `mm` maintains a positive margin everywhere: 1.60–11.06×. The D=256 column ranges from 1.60× (B=32) to 3.19× (B=65536) — a clear win even in the exact regime where `fwd` lost. The D=64 column reaches 11.06× at B=65536 driven by B-scaling. The bottom-right region (large B, any D) is brightest, consistent with FAISS's fixed overhead being overwhelmed by the volume of useful work. This heatmap, paired with the N=256 fwd vs faiss heatmap, is the strongest argument for preferring `mm` over `fwd` as the default kernel for standard rec-system codebook sizes.
 
+## HuggingFace Integration
+
+`rectokens.integrations.hf` bridges RecTokens item tokenizers with HuggingFace models for end-to-end training of generative recommendation models. The integration has three components:
+
+- **`ItemAwareTokenizer`** — extends a HF text tokenizer with item tokens (`<item_L{l}_C{c}>`), one per level/code pair. Encodes mixed text+item sequences to flat token id lists, decodes them back, and builds a `CompactCSRTrie` over the catalog for constrained generation.
+- **`InterleavedSequenceCollator`** — collates mixed text/item example lists into padded `input_ids`, `attention_mask`, and `labels` tensors ready for `model(**batch)`. Supports `loss_on="all"|"items"|"text"` to mask loss to specific token types.
+- **`resize_and_initialize`** (`rectokens.integrations.hf.model`) — resizes the HF model's embedding table and `lm_head` to include item tokens. Optionally initializes item embeddings from projected RQ codebook vectors.
+
+### Finetuning Qwen3 on item sequences
+
+```python
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from rectokens.integrations.hf.tokenizer import ItemAwareTokenizer
+from rectokens.integrations.hf.collator import InterleavedSequenceCollator
+from rectokens.integrations.hf.model import resize_and_initialize
+from rectokens.tokenizers.rqvae import RQVAETokenizer
+
+# 1. Load a pre-fitted item tokenizer (frozen)
+item_tok = RQVAETokenizer.load("item_tok.pt").cuda().eval()
+
+# 2. Wrap HF tokenizer to register item tokens in the vocabulary
+hf_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-1.7B")
+aware_tokenizer = ItemAwareTokenizer(
+    hf_tokenizer,
+    item_tokenizer=item_tok,
+    num_levels=3,
+    codebook_size=256,
+)
+# vocab now includes 3×256 = 768 new item tokens: <item_L0_C0> … <item_L2_C255>
+
+# 3. Load model and resize embeddings to the extended vocab
+model = AutoModelForCausalLM.from_pretrained(
+    "Qwen/Qwen3-1.7B", torch_dtype=torch.bfloat16
+).cuda()
+resize_and_initialize(model, aware_tokenizer)
+# Optionally pass projection= to initialize item embeddings from RQ codebook vectors
+
+# 4. Build training examples as lists of str | Tensor
+#    Strings are text; Tensors of shape (D,) are item embeddings
+examples = [
+    ["User watched ", item_embedding_a, " then ", item_embedding_b, ". Next: "],
+    ["User bought ", item_embedding_c, ". Recommend: "],
+]
+
+# 5. Collate — loss only on item token positions
+pad_id = hf_tokenizer.eos_token_id
+collator = InterleavedSequenceCollator(
+    aware_tokenizer,
+    loss_on="items",       # "all" | "items" | "text"
+    pad_token_id=pad_id,
+    max_length=512,
+)
+batch = collator(examples)
+# batch: {input_ids, attention_mask, labels} — ready for model(**batch)
+
+# 6. Training step
+optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
+out = model(**{k: v.cuda() for k, v in batch.items()})
+out.loss.backward()
+optimizer.step()
+```
+
+### Constrained generation at inference time
+
+```python
+# Build a trie over the item catalog (catalog_codes: (N, num_levels) int tensor)
+trie = aware_tokenizer.build_item_trie(catalog_codes, dense_lookup_layers=1)
+
+# Use autoregressive_generate with the extended vocab trie
+from rectokens.decoding.constrained_decoding import autoregressive_generate
+from rectokens.schemas.config import GenerationConfig
+
+generated = autoregressive_generate(
+    model=model,
+    trie=trie,
+    input_ids=user_history_ids,   # (B, T) in the extended HF vocab
+    generation_config=GenerationConfig(steps=3, k=10, beam_size=50),
+)
+# generated: (B, k, 3) item token sequences in the extended HF vocab space
+```
+
+### Full training script
+
+`examples/finetune_qwen.py` provides a complete training loop for Qwen3 on Amazon review sequences, with gradient accumulation and per-epoch checkpoint saving:
+
+```bash
+python examples/training/finetune_qwen.py \
+    --root data/amazon --split beauty --seq_split train \
+    --item_tok_path item_tok.pt --num_levels 3 --codebook_size 256 \
+    --model_name Qwen/Qwen3-1.7B \
+    --batch_size 4 --grad_accum 4 --num_epochs 3 \
+    --max_seq_len 20 --max_length 512 \
+    --bf16 --output_dir checkpoints/
+```
+
 ## Module Structure
 
 ```
@@ -314,6 +410,8 @@ rectokens/
 ├── ops/                # Python wrappers for kernels
 ├── kernels/            # Triton GPU kernels
 ├── modules/            # SparseLinear, ConstraintEnforcer (PyTorch modules)
+├── integrations/
+│   └── hf/             # ItemAwareTokenizer, InterleavedSequenceCollator, resize_and_initialize
 └── datasets.py         # NumpyDataset, TensorDataset
 ```
 
@@ -330,6 +428,8 @@ rectokens/
 ## References
 
 - Rajput et al. **Recommender Systems with Generative Retrieval.** NeurIPS 2023. https://arxiv.org/abs/2305.05065
+
+- He et al. **PLUM: Adapting Pre-trained Language Models for Industrial-scale Generative Recommendations.** Google, 2025. https://arxiv.org/abs/2510.07784
 
 - Zhou et al. **OneRec Technical Report.** 2025. https://arxiv.org/abs/2506.13695
 

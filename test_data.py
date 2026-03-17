@@ -70,7 +70,7 @@ def train_rqvae(
         hidden_dim=hidden_dim,
         num_levels=num_levels,
         codebook_size=codebook_size,
-        learnable_codebook=True,
+        learnable_codebook=False,
     ).to(device)
 
     # AdamW only sees encoder + decoder weights — codebook embeddings are
@@ -126,7 +126,7 @@ if __name__ == "__main__":
 
     model = train_rqvae(
         dataset,
-        latent_dim=32,
+        latent_dim=64,
         hidden_dim=512,
         num_levels=3,
         codebook_size=256,

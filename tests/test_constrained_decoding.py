@@ -16,10 +16,10 @@ from rectokens.schemas.state import (
 )
 from rectokens.schemas.config import GenerationConfig
 from rectokens.decoding.constrained_decoding import (
-    ModelInferenceOutput,
     RandomModel,
     decode_one_step,
 )
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 
 device = torch.device("cuda")
@@ -49,7 +49,7 @@ def make_trie(seqs, vocab_size=8, dense_lookup_layers=2):
 
 
 class _ModelWithKVCache(nn.Module):
-    """Like RandomModel but returns a non-None kv_cache so expansion can be tested."""
+    """Like RandomModel but returns non-None past_key_values so expansion can be tested."""
 
     def __init__(self, vocab_size, hidden_size, cache_dim=4):
         super().__init__()
@@ -57,13 +57,17 @@ class _ModelWithKVCache(nn.Module):
         self.linear = nn.Linear(hidden_size, vocab_size)
         self.cache_dim = cache_dim
 
-    def forward(self, input_ids, kv_cache=None):
+    def forward(self, input_ids, past_key_values=None, use_cache=False, attention_mask=None):
         x = self.embedding(input_ids)
-        logits = self.linear(x)
-        new_cache = {
-            0: torch.zeros(input_ids.shape[0], self.cache_dim, device=input_ids.device)
-        }
-        return ModelInferenceOutput(logits=logits[:, -1], kv_cache=new_cache)
+        logits = self.linear(x)  # (B, seq_len, vocab_size)
+        B = input_ids.shape[0]
+        new_past_kv = (
+            (
+                torch.zeros(B, 1, 1, self.cache_dim, device=input_ids.device),
+                torch.zeros(B, 1, 1, self.cache_dim, device=input_ids.device),
+            ),
+        )
+        return CausalLMOutputWithPast(logits=logits, past_key_values=new_past_kv)
 
 
 def _run_beam_loop(trie, model, input_ids, vocab_size, seq_len, k, beam_size):
@@ -269,11 +273,50 @@ class TestConstrainedDecoding(unittest.TestCase):
                 model_fwd=model,
                 input_ids=input_ids,
             )
-            kv = state.generation_state.kv_cache
-            assert kv is not None
-            assert kv[0].shape[0] == B * k
+            pkv = state.generation_state.past_key_values
+            assert pkv is not None
+            assert pkv[0][0].shape[0] == B * k
             gen = state.generation_state.generated_ids
             input_ids = gen.reshape(-1, gen.shape[-1])[:, -1:]
+
+    def test_attention_mask_shape_and_accumulation(self) -> None:
+        """attention_mask in state has shape (B*k, prompt_len + step) after each step."""
+        vocab_size = 8
+        trie = make_trie(SEQS_5, vocab_size=vocab_size, dense_lookup_layers=2)
+        model = RandomModel(vocab_size=vocab_size, hidden_size=16).to(device)
+
+        B, seq_len, k, beam_size = 2, 4, 3, 6
+        input_ids = torch.randint(0, vocab_size, (B, seq_len), device=device)
+        attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
+        # Mark first token of each sequence as padding to exercise mask tracking
+        attention_mask[:, 0] = 0
+
+        state = ConstrainedGenerationState(
+            generation_config=GenerationConfig(
+                steps=len(SEQS_5[0]), k=k, beam_size=beam_size
+            ),
+            constraint_state=ConstraintState(step=0, trie=trie, cur_node=None),
+        )
+        for step_idx in range(len(SEQS_5[0])):
+            state = decode_one_step(
+                constrained_generation_state=state,
+                model_fwd=model,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+            mask = state.generation_state.attention_mask
+            assert mask is not None
+            # After step_idx steps: prompt (seq_len) + step_idx+1 generated tokens
+            assert mask.shape == (B * k, seq_len + step_idx + 1), (
+                f"step {step_idx}: expected ({B * k}, {seq_len + step_idx + 1}), got {mask.shape}"
+            )
+            # Prompt positions retain the original padding pattern (expanded to B*k)
+            assert (mask[:, 0] == 0).all(), "padding column must stay 0"
+            # All generated-token columns must be 1
+            assert (mask[:, seq_len:] == 1).all(), "generated token columns must be 1"
+            gen = state.generation_state.generated_ids
+            input_ids = gen.reshape(-1, gen.shape[-1])[:, -1:]
+            attention_mask = None  # subsequent steps use accumulated mask from state
 
     def test_beam_search_k1_beam1_is_valid(self) -> None:
         """k=1, beam_size=1 still produces valid sequences (should match greedy behaviour)."""

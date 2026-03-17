@@ -1,9 +1,11 @@
+import os
 import torch
 import triton
 import triton.language as tl
 from torch.library import triton_op
 from torch.library import wrap_triton
 from rectokens.kernels.utils import tl_fp32_to_tf32
+
 
 IS_PTX_RNA_TF32_SUPPORTED = (
     torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 8
@@ -20,7 +22,7 @@ def quantize_fwd(
     B, D = x.shape
     N, _ = codebook.shape
 
-    quantized = torch.empty(B, dtype=torch.int32, device=x.device)
+    quantized = torch.empty(B, dtype=torch.int64, device=x.device)
 
     grid = lambda meta: (triton.cdiv(B, meta["BLOCK_B"]),)
     wrap_triton(quantize_fwd_kernel)[grid](
@@ -48,6 +50,15 @@ def quantize_fwd(
         triton.Config({"BLOCK_B": 64, "BLOCK_N": 64}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_B": 128, "BLOCK_N": 64}, num_warps=8, num_stages=3),
         triton.Config({"BLOCK_B": 256, "BLOCK_N": 32}, num_warps=8, num_stages=2),
+        # Larger BLOCK_N reduces loop iterations over N (4× fewer for BLOCK_N=128 vs 32)
+        triton.Config({"BLOCK_B": 64, "BLOCK_N": 128}, num_warps=4, num_stages=4),
+        triton.Config({"BLOCK_B": 128, "BLOCK_N": 128}, num_warps=8, num_stages=4),
+        # Small BLOCK_B + large BLOCK_N: maximize N-reuse when B is small or N is large
+        triton.Config({"BLOCK_B": 16, "BLOCK_N": 128}, num_warps=4, num_stages=4),
+        triton.Config({"BLOCK_B": 32, "BLOCK_N": 128}, num_warps=4, num_stages=4),
+        triton.Config({"BLOCK_B": 16, "BLOCK_N": 256}, num_warps=4, num_stages=4),
+        triton.Config({"BLOCK_B": 32, "BLOCK_N": 256}, num_warps=8, num_stages=4),
+        triton.Config({"BLOCK_B": 64, "BLOCK_N": 256}, num_warps=8, num_stages=4),
     ],
     key=["B", "N", "D"],
     restore_value=["out_ptr"],
@@ -86,7 +97,7 @@ def quantize_fwd_kernel(
     )
 
     min_dist = tl.full((BLOCK_B,), float("inf"), dtype=tl.float32)
-    cluster = tl.full((BLOCK_B,), -1, dtype=tl.int32)
+    cluster = tl.full((BLOCK_B,), -1, dtype=tl.int64)
     for n in range(0, tl.cdiv(N, BLOCK_N)):
         n_mask = offs_N[None, :] < N - n * BLOCK_N
         block_mask = n_mask & (offs_D[:, None] < D)
@@ -124,9 +135,9 @@ def quantize_fwd_mm(
     B, D = x.shape
     N, _ = codebook.shape
 
-    quantized = torch.empty(B, dtype=torch.int32, device=x.device)
+    quantized = torch.empty(B, dtype=torch.int64, device=x.device)
     dist = torch.full_like(quantized, float("inf"), dtype=torch.float32)
-    locks = quantized.new_full((triton.cdiv(B, 16),), 0)
+    locks = quantized.new_full((triton.cdiv(B, 16),), 0, dtype=torch.int32)
 
     grid = lambda meta: (
         triton.cdiv(B, meta["BLOCK_B"]) * triton.cdiv(N, meta["BLOCK_N"]),
@@ -182,6 +193,22 @@ def quantize_fwd_mm(
             {"BLOCK_B": 128, "BLOCK_N": 128, "BLOCK_D": 32, "GROUP_SIZE_M": 4},
             num_warps=8,
             num_stages=3,
+        ),
+        # Larger BLOCK_D reduces D-loop iterations; larger BLOCK_N improves N-tile reuse
+        triton.Config(
+            {"BLOCK_B": 128, "BLOCK_N": 64, "BLOCK_D": 64, "GROUP_SIZE_M": 8},
+            num_warps=8,
+            num_stages=4,
+        ),
+        triton.Config(
+            {"BLOCK_B": 64, "BLOCK_N": 128, "BLOCK_D": 32, "GROUP_SIZE_M": 8},
+            num_warps=8,
+            num_stages=4,
+        ),
+        triton.Config(
+            {"BLOCK_B": 128, "BLOCK_N": 128, "BLOCK_D": 64, "GROUP_SIZE_M": 4},
+            num_warps=8,
+            num_stages=4,
         ),
     ],
     key=["B", "N", "D"],

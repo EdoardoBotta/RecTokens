@@ -8,14 +8,9 @@ from rectokens.schemas.state import GenerationState
 from rectokens.ops.constrained_node_transition import constrained_node_transition
 from rectokens.modules.sparse_linear import SparseLinear
 from rectokens.modules.constraint_enforcer import ConstraintEnforcer
-from typing import NamedTuple
 from typing import Optional
 from torch import nn
-
-
-class ModelInferenceOutput(NamedTuple):
-    logits: torch.Tensor
-    kv_cache: Optional[dict[int, torch.Tensor]]
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 
 class RandomModel(nn.Module):
@@ -24,11 +19,10 @@ class RandomModel(nn.Module):
         self.embedding = nn.Embedding(vocab_size, hidden_size)
         self.linear = nn.Linear(hidden_size, vocab_size, bias=False)
 
-    def forward(self, input_ids, kv_cache=None):
+    def forward(self, input_ids, past_key_values=None, use_cache=False, attention_mask=None):
         x = self.embedding(input_ids)
-        hidden = x[:, -1]
-        logits = self.linear(hidden)
-        return ModelInferenceOutput(logits=logits, kv_cache=None)
+        logits = self.linear(x)  # (B, seq_len, vocab_size)
+        return CausalLMOutputWithPast(logits=logits, past_key_values=None)
 
 
 @torch.inference_mode()
@@ -38,6 +32,7 @@ def autoregressive_generate(
     input_ids: torch.Tensor,
     generation_config: GenerationConfig,
     attr_path: Optional[str] = None,
+    attention_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Run constrained autoregressive generation for `seq_len` steps.
@@ -63,19 +58,21 @@ def autoregressive_generate(
             constrained_generation_state=state,
             model_fwd=model,
             input_ids=input_ids,
+            attention_mask=attention_mask,
         )
         gen = state.generation_state.generated_ids  # (B, k, step+1)
         input_ids = gen.reshape(-1, gen.shape[-1])[:, -1:]  # (B*k, 1)
+        attention_mask = None  # subsequent steps use accumulated mask from state
 
     return state.generation_state.generated_ids
 
 
-def _reindex_kv_cache(
-    kv_cache: Optional[dict], indices: torch.Tensor
-) -> Optional[dict]:
-    if kv_cache is None:
+def _reindex_past_key_values(
+    past_key_values: Optional[tuple], indices: torch.Tensor
+) -> Optional[tuple]:
+    if past_key_values is None:
         return None
-    return {layer: tensor[indices] for layer, tensor in kv_cache.items()}
+    return tuple((k[indices], v[indices]) for k, v in past_key_values)
 
 
 @torch.inference_mode()
@@ -83,6 +80,7 @@ def decode_one_step(
     constrained_generation_state: ConstrainedGenerationState,
     model_fwd: nn.Module,
     input_ids: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
 ) -> ConstrainedGenerationState:
     assert input_ids.ndim == 2  # (B, seq_len) on step 0, (B*k, 1) on subsequent steps
 
@@ -94,10 +92,13 @@ def decode_one_step(
     k, beam_size = config.k, config.beam_size
 
     if is_first_step:
-        kv_cache, log_probas = None, None
+        past_key_values, log_probas = None, None
+        # attention_mask comes from the function argument (prompt padding mask)
     else:
-        kv_cache = generation_state.kv_cache
+        past_key_values = generation_state.past_key_values
         log_probas = generation_state.log_probas
+        # Accumulated mask from prior steps: (B*k, prompt_len + steps_done)
+        attention_mask = generation_state.attention_mask
 
     constrained_linear = (
         next((m for m in model_fwd.modules() if isinstance(m, SparseLinear)), None)
@@ -108,8 +109,15 @@ def decode_one_step(
     if constrained_linear is not None and step >= len(trie.dense_mask_by_layer):
         constrained_linear.set_context(constrained_generation_state.constraint_state)
 
-    model_output = model_fwd(input_ids, kv_cache)
-    logits = model_output.logits
+    model_output = model_fwd(
+        input_ids,
+        past_key_values=past_key_values,
+        attention_mask=attention_mask,
+        use_cache=True,
+    )
+    logits = model_output.logits[:, -1, :]  # (B, vocab_size)
+    new_past_kv = model_output.past_key_values
+
     if constrained_linear is not None:
         constrained_linear.clear_context()
 
@@ -163,9 +171,9 @@ def decode_one_step(
         # Each of the B originals produces k children: parent[b*k + i] = b
         flat_parent_ids = torch.arange(B, device=input_ids.device).repeat_interleave(k)
 
-        # Expand kv_cache to match the new B*k batch size
+        # Expand past_key_values to match the new B*k batch size
         expand_ids = torch.arange(B, device=input_ids.device).repeat_interleave(k)
-        new_kv_cache = _reindex_kv_cache(model_output.kv_cache, expand_ids)
+        new_past_kv = _reindex_past_key_values(new_past_kv, expand_ids)
     else:
         assert log_probas is not None
         # Accumulate log-probas across beams: (B, k*beam_size)
@@ -180,7 +188,7 @@ def decode_one_step(
         # Pick top-k per batch item
         top_k_log_probas, top_k_indices = total_log_probas.topk(k, dim=1)  # (B, k)
 
-        # Identify parent beams and reorder generated_ids / kv_cache accordingly
+        # Identify parent beams and reorder generated_ids / past_key_values accordingly
         parent_beam_ids = (
             top_k_indices // beam_size
         )  # (B, k) — which beam [0,k) within each B
@@ -195,8 +203,23 @@ def decode_one_step(
 
         new_log_probas = top_k_log_probas.reshape(B * k)
 
-        # Reorder kv_cache to match selected parent beams
-        new_kv_cache = _reindex_kv_cache(model_output.kv_cache, flat_parent_ids)
+        # Reorder past_key_values to match selected parent beams
+        new_past_kv = _reindex_past_key_values(new_past_kv, flat_parent_ids)
+
+    # Build the accumulated attention mask for the next step.
+    # flat_parent_ids (shape B*k) reindexes either the prompt (B rows → B*k rows on
+    # the first step) or the current beams (B*k → B*k after parent selection).
+    # Appending a column of 1s accounts for the token just generated.
+    if attention_mask is not None:
+        new_attention_mask = torch.cat(
+            [
+                attention_mask[flat_parent_ids],
+                torch.ones(B * k, 1, dtype=attention_mask.dtype, device=attention_mask.device),
+            ],
+            dim=1,
+        )
+    else:
+        new_attention_mask = None
 
     if step == len(trie.dense_mask_by_layer) - 1:
         # dense_states is indexed by the full token path; works per-beam since each
@@ -219,8 +242,9 @@ def decode_one_step(
         generation_config=config,
         generation_state=GenerationState(
             generated_ids=generated_ids.reshape(B, k, -1),
-            kv_cache=new_kv_cache,
+            past_key_values=new_past_kv,
             log_probas=new_log_probas,
+            attention_mask=new_attention_mask,
         ),
         constraint_state=ConstraintState(
             step=step + 1,

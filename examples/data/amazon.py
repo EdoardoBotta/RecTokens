@@ -8,7 +8,7 @@ import polars as pl
 import torch
 
 from collections import defaultdict
-from examples.preprocessing import PreprocessingMixin
+from examples.data.preprocessing import PreprocessingMixin
 from torch.utils.data import Dataset
 from torch_geometric.data import download_google_url
 from torch_geometric.data import extract_zip
@@ -167,6 +167,48 @@ class AmazonReviews(InMemoryDataset, PreprocessingMixin):
         data["item"].is_train = torch.rand(item_emb.shape[0], generator=gen) > 0.05
 
         self.save([data], self.processed_paths[0])
+
+
+class UserSequenceDataset(Dataset):
+    def __init__(
+        self,
+        root: str,
+        split: str,          # dataset split: "beauty", "sports", "toys"
+        seq_split: str,      # sequence split: "train", "eval", "test"
+        max_seq_len: int = 20,
+        include_future: bool = True,
+    ):
+        raw_data = AmazonReviews(root=root, split=split)
+        history = raw_data.data["user", "rated", "item"].history[seq_split]
+        # train sequences are variable-length (list of lists); eval/test are padded tensors
+        self._sequences = history["itemId"]
+        self._future_items = history["itemId_fut"]   # (num_users, 1) tensor
+        self.item_embs = raw_data.data["item"]["x"]  # (num_items, D) tensor
+        self.item_texts = raw_data.data["item"]["text"]  # numpy array of str
+        self.max_seq_len = max_seq_len
+        self.include_future = include_future
+
+    def __len__(self) -> int:
+        return len(self._sequences)
+
+    def __getitem__(self, idx) -> list:
+        # Get item IDs for this user sequence
+        seq = self._sequences[idx]
+        item_ids = seq if isinstance(seq, list) else seq.tolist()
+        item_ids = [i for i in item_ids if i >= 0]          # strip -1 padding
+        item_ids = item_ids[-self.max_seq_len:]              # keep last max_seq_len
+
+        if self.include_future:
+            fut = int(self._future_items[idx].item())
+            if fut >= 0:
+                item_ids = item_ids + [fut]
+
+        # Build interleaved [emb, text, emb, text, ...] list
+        parts = []
+        for iid in item_ids:
+            parts.append(self.item_embs[iid])        # (D,) — for semid encoding
+            parts.append(str(self.item_texts[iid]))  # text string
+        return parts
 
 
 class ItemData(Dataset):
