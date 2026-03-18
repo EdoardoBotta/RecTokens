@@ -90,11 +90,11 @@ class AmazonReviews(InMemoryDataset, PreprocessingMixin):
                 sequences["train"]["itemId"].append(train_items)
                 sequences["train"]["itemId_fut"].append(items[-2])
 
-                eval_items = items[-(max_seq_len + 2) : -2]
+                eval_items = items[-(max_seq_len + 1) : -1]
                 sequences["eval"]["itemId"].append(
                     eval_items + [-1] * (max_seq_len - len(eval_items))
                 )
-                sequences["eval"]["itemId_fut"].append(items[-2])
+                sequences["eval"]["itemId_fut"].append(items[-1])
 
                 test_items = items[-(max_seq_len + 1) : -1]
                 sequences["test"]["itemId"].append(
@@ -209,6 +209,31 @@ class UserSequenceDataset(Dataset):
             parts.append(self.item_embs[iid])        # (D,) — for semid encoding
             parts.append(str(self.item_texts[iid]))  # text string
         return parts
+
+
+class PrecomputedSequenceDataset(Dataset):
+    """Dataset that loads precomputed interleaved token-ID sequences from disk.
+
+    Each item is a 1D ``torch.long`` tensor of token IDs produced by
+    ``scripts/preprocessing/precompute_sequences.py``.  Loading these avoids
+    any neural-network inference during training.
+
+    Args:
+        path: Path to a ``.pt`` file saved by the preprocessing script.
+    """
+
+    def __init__(self, path: str) -> None:
+        data = torch.load(path, weights_only=False)
+        self.sequences: list[torch.Tensor] = data["sequences"]
+        self.original_vocab_size: int = data["original_vocab_size"]
+        self.num_levels: int = data["num_levels"]
+        self.codebook_size: int = data["codebook_size"]
+
+    def __len__(self) -> int:
+        return len(self.sequences)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        return self.sequences[idx]  # 1D long tensor
 
 
 class ItemData(Dataset):

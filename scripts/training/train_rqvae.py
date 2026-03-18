@@ -32,10 +32,19 @@ def get_device() -> torch.device:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train RQVAETokenizer on Amazon item embeddings")
+    p = argparse.ArgumentParser(
+        description="Train RQVAETokenizer on Amazon item embeddings"
+    )
     p.add_argument("--root", type=str, default="data/amazon")
-    p.add_argument("--split", type=str, default="beauty", choices=["beauty", "sports", "toys"])
-    p.add_argument("--train_test_split", type=str, default="train", choices=["train", "eval", "all"])
+    p.add_argument(
+        "--split", type=str, default="beauty", choices=["beauty", "sports", "toys"]
+    )
+    p.add_argument(
+        "--train_test_split",
+        type=str,
+        default="train",
+        choices=["train", "eval", "all"],
+    )
     p.add_argument("--latent_dim", type=int, default=64)
     p.add_argument("--hidden_dim", type=int, default=512)
     p.add_argument("--num_levels", type=int, default=3)
@@ -45,8 +54,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=1e-4)
     p.add_argument("--log_every", type=int, default=1)
-    p.add_argument("--save_every", type=int, default=10,
-                   help="Save a checkpoint every this many epochs (0 = only save at end)")
+    p.add_argument(
+        "--save_every",
+        type=int,
+        default=10,
+        help="Save a checkpoint every this many epochs (0 = only save at end)",
+    )
     p.add_argument("--output_dir", type=str, default="checkpoints/rqvae")
     return p.parse_args()
 
@@ -55,7 +68,9 @@ def train(args: argparse.Namespace) -> RQVAETokenizer:
     device = get_device()
     print(f"Training on: {device}")
 
-    dataset = ItemData(root=args.root, split=args.split, train_test_split=args.train_test_split)
+    dataset = ItemData(
+        root=args.root, split=args.split, train_test_split=args.train_test_split
+    )
     print(f"Dataset: {len(dataset)} items, dim={dataset[0].x.shape[0]}")
 
     input_dim = dataset[0].x.shape[0]
@@ -90,7 +105,9 @@ def train(args: argparse.Namespace) -> RQVAETokenizer:
             optimizer.zero_grad()
 
             out = model(x)
-            recon_loss = F.mse_loss(out["recon"], x, reduction="none").sum(dim=-1).mean()
+            recon_loss = (
+                F.mse_loss(out["recon"], x, reduction="none").sum(dim=-1).mean()
+            )
             commit_loss = out["commitment_loss"]
             (recon_loss + commit_loss).backward()
             optimizer.step()
@@ -128,7 +145,9 @@ if __name__ == "__main__":
     model = train(args)
 
     # Sanity check
-    dataset = ItemData(root=args.root, split=args.split, train_test_split=args.train_test_split)
+    dataset = ItemData(
+        root=args.root, split=args.split, train_test_split=args.train_test_split
+    )
     model.eval()
     device = next(model.parameters()).device
     tokens = model.encode(dataset.item_data[:4].float().to(device))

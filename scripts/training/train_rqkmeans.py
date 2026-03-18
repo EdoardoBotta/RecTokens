@@ -22,23 +22,38 @@ from rectokens.tokenizers.rq_kmeans import RQKMeansTokenizer
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train RQKMeansTokenizer on Amazon item embeddings")
+    p = argparse.ArgumentParser(
+        description="Train RQKMeansTokenizer on Amazon item embeddings"
+    )
     p.add_argument("--root", type=str, default="data/amazon")
-    p.add_argument("--split", type=str, default="beauty", choices=["beauty", "sports", "toys"])
-    p.add_argument("--train_test_split", type=str, default="train", choices=["train", "eval", "all"])
+    p.add_argument(
+        "--split", type=str, default="beauty", choices=["beauty", "sports", "toys"]
+    )
+    p.add_argument(
+        "--train_test_split",
+        type=str,
+        default="train",
+        choices=["train", "eval", "all"],
+    )
     p.add_argument("--num_levels", type=int, default=3)
     p.add_argument("--codebook_size", type=int, default=256)
     p.add_argument("--num_epochs", type=int, default=20)
     p.add_argument("--batch_size", type=int, default=640)
     p.add_argument("--log_every", type=int, default=1)
-    p.add_argument("--save_every", type=int, default=5,
-                   help="Save a checkpoint every this many epochs (0 = only save at end)")
+    p.add_argument(
+        "--save_every",
+        type=int,
+        default=5,
+        help="Save a checkpoint every this many epochs (0 = only save at end)",
+    )
     p.add_argument("--output_dir", type=str, default="checkpoints/rqkmeans")
     return p.parse_args()
 
 
 def train(args: argparse.Namespace) -> RQKMeansTokenizer:
-    dataset = ItemData(root=args.root, split=args.split, train_test_split=args.train_test_split)
+    dataset = ItemData(
+        root=args.root, split=args.split, train_test_split=args.train_test_split
+    )
     print(f"Dataset: {len(dataset)} items, dim={dataset[0].x.shape[0]}")
 
     input_dim = dataset[0].x.shape[0]
@@ -101,7 +116,9 @@ if __name__ == "__main__":
     model = train(args)
 
     # Sanity check
-    dataset = ItemData(root=args.root, split=args.split, train_test_split=args.train_test_split)
+    dataset = ItemData(
+        root=args.root, split=args.split, train_test_split=args.train_test_split
+    )
     tokens = model.encode(dataset.item_data[:4].float())
     recon = model.decode(tokens)
     print(f"\nEncoded shape : {tokens.codes.shape}")

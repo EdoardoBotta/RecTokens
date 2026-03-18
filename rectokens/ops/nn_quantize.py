@@ -6,7 +6,8 @@ if IS_GPU_AVAILABLE:
     from rectokens.kernels.nn_quantize import quantize_fwd
     from rectokens.kernels.nn_quantize import quantize_fwd_mm
 
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision("high")
+
 
 def _cuda_nearest_neighbor_quantize(x: torch.Tensor, codebook: torch.Tensor):
     B, D = x.shape

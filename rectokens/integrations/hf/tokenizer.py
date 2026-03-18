@@ -88,26 +88,27 @@ class ItemAwareTokenizer:
         ids: list[int] = []
         for i, part in enumerate(parts):
             if isinstance(part, str):
-                ids.extend(
-                    self._text_tokenizer.encode(part, add_special_tokens=False)
-                )
+                ids.extend(self._text_tokenizer.encode(part, add_special_tokens=False))
             else:
                 # Insert <item_start> separator when transitioning from text → item.
                 if i > 0 and isinstance(parts[i - 1], str):
                     ids.append(self.item_sep_token_id)
-                # part: (D,) item embedding tensor — move to tokenizer's device/dtype
-                param = next(self.item_tokenizer.parameters())
+                # part: (D,) item embedding tensor — move to tokenizer's device/dtype.
+                # Fall back to CPU float32 for non-Module tokenizers (e.g. RQKMeansTokenizer).
+                try:
+                    param = next(self.item_tokenizer.parameters())
+                    device, dtype = param.device, param.dtype
+                except (AttributeError, StopIteration):
+                    device, dtype = torch.device("cpu"), torch.float32
                 token_seq: TokenSequence = self.item_tokenizer.encode(
-                    part.unsqueeze(0).to(device=param.device, dtype=param.dtype)
+                    part.unsqueeze(0).to(device=device, dtype=dtype)
                 )
                 codes = token_seq.codes[0]  # (num_levels,)
                 for l in range(self.num_levels):
                     ids.append(self.item_token_id(l, int(codes[l].item())))
         return ids
 
-    def decode_sequence(
-        self, ids: list[int]
-    ) -> list[str | TokenSequence]:
+    def decode_sequence(self, ids: list[int]) -> list[str | TokenSequence]:
         """Decode a flat list of HF token ids back to text spans and item TokenSequences.
 
         Consecutive item tokens are grouped into a single ``TokenSequence`` per item.
@@ -171,10 +172,7 @@ class ItemAwareTokenizer:
         """
         N, L = catalog_codes.shape
         hf_ids = torch.stack(
-            [
-                catalog_codes[:, l] + self.item_token_id(l, 0)
-                for l in range(L)
-            ],
+            [catalog_codes[:, l] + self.item_token_id(l, 0) for l in range(L)],
             dim=1,
         )  # (N, L)
 

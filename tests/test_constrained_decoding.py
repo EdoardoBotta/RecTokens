@@ -57,7 +57,9 @@ class _ModelWithKVCache(nn.Module):
         self.linear = nn.Linear(hidden_size, vocab_size)
         self.cache_dim = cache_dim
 
-    def forward(self, input_ids, past_key_values=None, use_cache=False, attention_mask=None):
+    def forward(
+        self, input_ids, past_key_values=None, use_cache=False, attention_mask=None
+    ):
         x = self.embedding(input_ids)
         logits = self.linear(x)  # (B, seq_len, vocab_size)
         B = input_ids.shape[0]

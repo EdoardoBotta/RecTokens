@@ -19,7 +19,9 @@ class RandomModel(nn.Module):
         self.embedding = nn.Embedding(vocab_size, hidden_size)
         self.linear = nn.Linear(hidden_size, vocab_size, bias=False)
 
-    def forward(self, input_ids, past_key_values=None, use_cache=False, attention_mask=None):
+    def forward(
+        self, input_ids, past_key_values=None, use_cache=False, attention_mask=None
+    ):
         x = self.embedding(input_ids)
         logits = self.linear(x)  # (B, seq_len, vocab_size)
         return CausalLMOutputWithPast(logits=logits, past_key_values=None)
@@ -214,7 +216,9 @@ def decode_one_step(
         new_attention_mask = torch.cat(
             [
                 attention_mask[flat_parent_ids],
-                torch.ones(B * k, 1, dtype=attention_mask.dtype, device=attention_mask.device),
+                torch.ones(
+                    B * k, 1, dtype=attention_mask.dtype, device=attention_mask.device
+                ),
             ],
             dim=1,
         )

@@ -71,8 +71,8 @@ def resize_and_initialize(
         for l in range(item_tokenizer.num_levels):
             codebook = item_tokenizer.item_tokenizer.rq.levels[l].codebook
             all_codes = torch.arange(item_tokenizer.codebook_size)
-            vecs = codebook.lookup(all_codes)       # (K, latent_dim)
-            projected = projection(vecs)             # (K, hidden_size)
+            vecs = codebook.lookup(all_codes)  # (K, latent_dim)
+            projected = projection(vecs)  # (K, hidden_size)
             start = item_tokenizer.item_token_id(l, 0)
             emb.weight.data[start : start + item_tokenizer.codebook_size] = (
                 projected.detach()

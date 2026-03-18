@@ -110,7 +110,7 @@ def run_for_N(n_val, B_vals, D_vals):
     global N
     N = n_val
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print(f"Benchmarking N={N} (fixed)")
     print(f"B_vals={B_vals}")
     print(f"D_vals={D_vals}\n")
