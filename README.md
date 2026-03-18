@@ -4,10 +4,11 @@ A tokenizer library for sequential recommendation systems. RecTokens converts co
 
 ## Overview
 
-Modern sequential recommendation models treat item retrieval as a language modeling problem: given a user's interaction history, generate the next item's token sequence autoregressively. RecTokens provides two components for this pipeline:
+Modern sequential recommendation models treat item retrieval as a language modeling problem: given a user's interaction history, generate the next item's token sequence autoregressively. RecTokens provides three components for this pipeline:
 
 1. **Tokenizers** — Convert item feature vectors into discrete token sequences (item IDs).
 2. **Constrained Decoding** — At inference time, efficiently restrict the model's generation to only valid item token sequences.
+3. **HuggingFace Integration** — Plug item tokens directly into any pretrained LLM from HuggingFace. `ItemAwareTokenizer` extends an HF text tokenizer with item-level tokens, `resize_and_initialize` adapts the model's embedding table, and `InterleavedSequenceCollator` / `PrecomputedSequenceCollator` prepare mixed text+item batches for standard HF `Trainer` fine-tuning. This lets you fine-tune models like Qwen on recommendation sequences with minimal boilerplate.
 
 ### Residual Quantization
 
