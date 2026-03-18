@@ -74,6 +74,10 @@ def _reindex_past_key_values(
 ) -> Optional[tuple]:
     if past_key_values is None:
         return None
+    # HF DynamicCache (transformers >= 4.38): reorder in-place, no copy needed.
+    if hasattr(past_key_values, "reorder_cache"):
+        past_key_values.reorder_cache(indices)
+        return past_key_values
     return tuple((k[indices], v[indices]) for k, v in past_key_values)
 
 

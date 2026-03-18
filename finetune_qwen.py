@@ -101,7 +101,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--eval_every",
         type=int,
-        default=500,
+        default=0,
         help="Evaluate every N steps (0 = no mid-training eval)",
     )
     # Precision / memory
@@ -197,6 +197,7 @@ def train(args: argparse.Namespace) -> None:
         save_strategy="steps",
         save_steps=save_steps,
         save_total_limit=3,
+        save_only_model=True,
         report_to=report_to,
         dataloader_num_workers=4,  # collator is CPU-only — workers are safe
         remove_unused_columns=False,
