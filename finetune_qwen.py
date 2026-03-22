@@ -83,6 +83,12 @@ def parse_args() -> argparse.Namespace:
         "--max_length", type=int, default=512, help="Truncate sequences to this length"
     )
     p.add_argument(
+        "--no_expand_vocab",
+        action="store_true",
+        help="Skip vocabulary expansion and embedding resize. Use when finetuning a "
+        "model whose vocabulary has already been expanded.",
+    )
+    p.add_argument(
         "--loss_on",
         type=str,
         default="all",
@@ -95,7 +101,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--save_every",
         type=int,
-        default=500,
+        default=5000,
         help="Save checkpoint every N steps (0 = epoch-end only)",
     )
     p.add_argument(
@@ -123,7 +129,7 @@ def train(args: argparse.Namespace) -> None:
         eval_dataset = PrecomputedSequenceDataset(args.precomputed_eval_path)
 
     # 2. HF text tokenizer (needed for pad_token_id and resize_and_initialize)
-    hf_tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    hf_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-2B")
     pad_token_id = hf_tokenizer.pad_token_id
     if pad_token_id is None:
         pad_token_id = hf_tokenizer.eos_token_id
@@ -152,12 +158,18 @@ def train(args: argparse.Namespace) -> None:
             "Make sure --model_name matches the one used during precomputation."
         )
 
-    # 4. Load model and resize embeddings for item tokens
+    # 4. Load model and (optionally) resize embeddings for item tokens
     dtype = torch.bfloat16 if args.bf16 else torch.float32
     model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=dtype).to(
         device
     )
-    resize_and_initialize(model, aware_tokenizer)
+    if not args.no_expand_vocab:
+        resize_and_initialize(model, aware_tokenizer)
+    else:
+        print(
+            f"[finetune_qwen] Skipping vocabulary expansion "
+            f"(expected vocab size: {aware_tokenizer.vocab_size})"
+        )
 
     # 5. Collator — no GPU calls, safe to use multiple workers
     collator = PrecomputedSequenceCollator(

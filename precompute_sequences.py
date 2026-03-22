@@ -9,7 +9,7 @@ any neural-network inference at training time.
 Usage:
     python precompute_sequences.py \
         --root data/amazon --split beauty \
-        --seq_splits train,eval \
+        --seq_splits train,test \
         --item_tok_path checkpoints/rqvae/final.pt \
         --num_levels 3 --codebook_size 256 \
         --model_name Qwen/Qwen3.5-2B \
@@ -76,6 +76,19 @@ def parse_args() -> argparse.Namespace:
         help="Append the future item to each sequence",
     )
     p.add_argument(
+        "--include_item_text",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include item text tokens in sequences (default: True). "
+        "When --no-include_item_text is set, sequences contain only "
+        "concatenated semantic IDs: <sep><semid_0>...<semid_L-1> per item.",
+    )
+    p.add_argument(
+        "--build_item_dataset",
+        action="store_true",
+        help="Also build a per-item dataset of <semid> <text> sequences (one entry per item).",
+    )
+    p.add_argument(
         "--output_dir",
         type=str,
         required=True,
@@ -139,21 +152,28 @@ def build_sequence_tokens(
     codes_table: torch.Tensor,  # (num_items, num_levels)
     item_texts: list[str],
     aware_tok: ItemAwareTokenizer,
+    include_item_text: bool = True,
 ) -> torch.Tensor:
     """Build the flat interleaved token-ID tensor for one user sequence.
 
     Mirrors ItemAwareTokenizer.encode_sequence() but uses the precomputed
     codes table instead of calling item_tokenizer.encode() per embedding.
+
+    Args:
+        include_item_text: If ``True`` (default), each item's text tokens are
+            prepended before its semantic ID tokens, producing interleaved
+            text+semid sequences.  If ``False``, text is omitted and the
+            sequence contains only concatenated semantic ID tokens:
+            ``<sep><semid_0>...<semid_L-1>  <sep><semid_0>...<semid_L-1>  ...``
     """
     ids: list[int] = []
-    prev_was_text = False
 
-    for i, iid in enumerate(item_ids):
-        # Text tokens for this item
-        text = str(item_texts[iid])
-        text_ids = aware_tok._text_tokenizer.encode(text, add_special_tokens=False)
-        ids.extend(text_ids)
-        prev_was_text = True
+    for iid in item_ids:
+        if include_item_text:
+            # Text tokens for this item
+            text = str(item_texts[iid])
+            text_ids = aware_tok._text_tokenizer.encode(text, add_special_tokens=False)
+            ids.extend(text_ids)
 
         # <item_start> separator + semantic ID tokens
         ids.append(aware_tok.item_sep_token_id)
@@ -164,6 +184,42 @@ def build_sequence_tokens(
     return torch.tensor(ids, dtype=torch.long)
 
 
+def build_item_dataset(
+    codes_table: torch.Tensor,  # (num_items, num_levels)
+    item_texts: list[str],
+    aware_tok: ItemAwareTokenizer,
+) -> list[torch.Tensor]:
+    """Build a per-item dataset of <semid> <text> sequences.
+
+    Each entry corresponds to one item and contains:
+        <item_sep> <semid_0> ... <semid_L-1> <text tokens>
+    """
+    results: list[torch.Tensor] = []
+    num_items = codes_table.shape[0]
+
+    for iid in range(num_items):
+        ids: list[int] = []
+
+        # Semantic ID tokens
+        ids.append(aware_tok.item_sep_token_id)
+        codes = codes_table[iid]
+        for l in range(aware_tok.num_levels):
+            ids.append(aware_tok.item_token_id(l, int(codes[l].item())))
+
+        # Text tokens
+        text = str(item_texts[iid])
+        text_ids = aware_tok._text_tokenizer.encode(text, add_special_tokens=False)
+        ids.extend(text_ids)
+
+        results.append(torch.tensor(ids, dtype=torch.long))
+
+        if iid % 10000 == 0:
+            print(f"  Built item sequence {iid}/{num_items}...", flush=True)
+
+    print(f"  Built all {num_items} item sequences.")
+    return results
+
+
 def precompute_split(
     seq_split: str,
     raw_data,
@@ -171,6 +227,7 @@ def precompute_split(
     aware_tok: ItemAwareTokenizer,
     max_seq_len: int,
     include_future: bool,
+    include_item_text: bool = True,
 ) -> list[torch.Tensor]:
     history = raw_data.data["user", "rated", "item"].history[seq_split]
     sequences_raw = history["itemId"]
@@ -195,7 +252,9 @@ def precompute_split(
             results.append(torch.zeros(0, dtype=torch.long))
             continue
 
-        tokens = build_sequence_tokens(item_ids, codes_table, item_texts, aware_tok)
+        tokens = build_sequence_tokens(
+            item_ids, codes_table, item_texts, aware_tok, include_item_text
+        )
         results.append(tokens)
 
         if idx % 1000 == 0:
@@ -238,7 +297,29 @@ def main() -> None:
         item_embs, item_tok, aware_tok, args.batch_size, device
     )  # (num_items, num_levels)
 
-    # 5. For each seq_split, assemble sequences and save
+    # 5. Optionally build per-item <semid> <text> dataset
+    if args.build_item_dataset:
+        print("\nBuilding per-item <semid> <text> dataset...")
+        item_texts = raw_data.data["item"]["text"]
+        item_sequences = build_item_dataset(codes_table, item_texts, aware_tok)
+        out_path = os.path.join(args.output_dir, f"{args.split}_items.pt")
+        torch.save(
+            {
+                "sequences": item_sequences,
+                "original_vocab_size": aware_tok.original_vocab_size,
+                "num_levels": args.num_levels,
+                "codebook_size": args.codebook_size,
+                "meta": {
+                    "split": args.split,
+                    "model_name": args.model_name,
+                    "item_tok_path": args.item_tok_path,
+                },
+            },
+            out_path,
+        )
+        print(f"  Saved {len(item_sequences)} item sequences to {out_path}")
+
+    # 6. For each user seq_split, assemble sequences and save
     seq_splits = [s.strip() for s in args.seq_splits.split(",") if s.strip()]
     for seq_split in seq_splits:
         print(f"\nPrecomputing sequences for seq_split='{seq_split}'...")
@@ -249,6 +330,7 @@ def main() -> None:
             aware_tok=aware_tok,
             max_seq_len=args.max_seq_len,
             include_future=args.include_future,
+            include_item_text=args.include_item_text,
         )
 
         out_path = os.path.join(args.output_dir, f"{args.split}_{seq_split}.pt")
@@ -264,6 +346,7 @@ def main() -> None:
                 "item_tok_path": args.item_tok_path,
                 "max_seq_len": args.max_seq_len,
                 "include_future": args.include_future,
+                "include_item_text": args.include_item_text,
             },
         }
         torch.save(payload, out_path)

@@ -25,6 +25,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from examples.data.amazon import AmazonReviews
+from rectokens.tokenizers.rqvae import RQVAETokenizer
+from rectokens.tokenizers.rq_kmeans import RQKMeansTokenizer
 from rectokens.decoding.constrained_decoding import autoregressive_generate
 from rectokens.integrations.hf.model import resize_and_initialize
 from rectokens.integrations.hf.tokenizer import ItemAwareTokenizer
@@ -41,12 +43,8 @@ def get_device() -> torch.device:
 
 def load_item_tokenizer(path: str, tok_type: str, device: torch.device):
     if tok_type == "rqvae":
-        from rectokens.tokenizers.rqvae import RQVAETokenizer
-
         tok = RQVAETokenizer.load(path).to(device)
     else:
-        from rectokens.tokenizers.rq_kmeans import RQKMeansTokenizer
-
         tok = RQKMeansTokenizer.load(path).to(device)
     tok.eval()
     for p in tok.parameters():
