@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NamedTuple
 
 import torch
 import torch.nn as nn
@@ -10,6 +11,26 @@ from rectokens.codebooks.euclidean import EuclideanCodebook
 from rectokens.core.quantizer import Quantizer, QuantizerOutput
 from rectokens.core.tokenizer import TokenSequence, Tokenizer
 from rectokens.quantizers.residual import ResidualQuantizer
+
+
+class RQVAEConfig(NamedTuple):
+    """Constructor arguments needed to reconstruct an :class:`RQVAETokenizer`."""
+
+    input_dim: int
+    latent_dim: int
+    hidden_dim: int
+    num_levels: int
+    codebook_size: int
+    learnable_codebook: bool
+
+
+class RQVAEOutput(NamedTuple):
+    """Output of :meth:`RQVAETokenizer.forward`."""
+
+    recon: torch.Tensor  # (B, input_dim) — reconstructed features
+    commitment_loss: torch.Tensor  # scalar VQ commitment loss
+    codes: torch.Tensor  # (B, num_levels) long — detached
+    p_unique_ids: torch.Tensor  # scalar — fraction of distinct token tuples in batch
 
 
 # ---------------------------------------------------------------------------
@@ -371,17 +392,15 @@ class RQVAETokenizer(nn.Module, Tokenizer):
     # nn.Module forward (used during training)
     # ------------------------------------------------------------------
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> RQVAEOutput:
         """Full encode → quantize → decode forward pass.
 
         Args:
             x: Float tensor of shape ``(B, input_dim)``.
 
         Returns:
-            Dict with keys:
-            - ``"recon"`` — reconstructed features ``(B, input_dim)``.
-            - ``"commitment_loss"`` — scalar VQ commitment loss.
-            - ``"codes"`` — long tensor ``(B, num_levels)`` (detached).
+            :class:`RQVAEOutput` with reconstructed features, commitment loss,
+            discrete codes, and the fraction of unique token tuples in the batch.
         """
         z = self.encoder(x)
         rq_out = self.rq.quantize(z)
@@ -396,12 +415,12 @@ class RQVAETokenizer(nn.Module, Tokenizer):
             # p_unique_ids = (# distinct tuples) / B
             p_unique_ids = (~torch.triu(eq, diagonal=1)).all(dim=1).float().mean()
 
-        return {
-            "recon": recon,
-            "commitment_loss": rq_out.commitment_loss,
-            "codes": rq_out.codes.detach(),
-            "p_unique_ids": p_unique_ids,
-        }
+        return RQVAEOutput(
+            recon=recon,
+            commitment_loss=rq_out.commitment_loss,
+            codes=rq_out.codes.detach(),
+            p_unique_ids=p_unique_ids,
+        )
 
     # ------------------------------------------------------------------
     # Tokenizer interface
@@ -418,7 +437,7 @@ class RQVAETokenizer(nn.Module, Tokenizer):
             2. A call to ``forward(batch)`` to get the outputs.
             3. Computing the total loss::
 
-                   loss = F.mse_loss(out["recon"], batch) + out["commitment_loss"]
+                   loss = F.mse_loss(out.recon, batch) + out.commitment_loss
 
                and calling ``loss.backward()`` and ``optimizer.step()``.
 
@@ -489,7 +508,9 @@ class RQVAETokenizer(nn.Module, Tokenizer):
             path: Destination file path.
         """
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"state_dict": self.state_dict(), "config": self._config()}, path)
+        torch.save(
+            {"state_dict": self.state_dict(), "config": self._config()._asdict()}, path
+        )
 
     @classmethod
     def load(cls, path: str) -> RQVAETokenizer:
@@ -507,12 +528,12 @@ class RQVAETokenizer(nn.Module, Tokenizer):
         model._fitted = True
         return model
 
-    def _config(self) -> dict:
-        return {
-            "input_dim": self.input_dim,
-            "latent_dim": self.latent_dim,
-            "hidden_dim": self.encoder.net[0].out_features,
-            "num_levels": self.num_levels,
-            "codebook_size": self.codebook_size,
-            "learnable_codebook": self.learnable_codebook,
-        }
+    def _config(self) -> RQVAEConfig:
+        return RQVAEConfig(
+            input_dim=self.input_dim,
+            latent_dim=self.latent_dim,
+            hidden_dim=self.encoder.net[0].out_features,
+            num_levels=self.num_levels,
+            codebook_size=self.codebook_size,
+            learnable_codebook=self.learnable_codebook,
+        )

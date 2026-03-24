@@ -171,7 +171,7 @@ optimizer = torch.optim.Adam(tokenizer.parameters(), lr=1e-3)
 
 for batch in data_loader:
     out = tokenizer(batch)
-    loss = F.mse_loss(out["recon"], batch) + out["commitment_loss"]
+    loss = F.mse_loss(out.recon, batch) + out.commitment_loss
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
@@ -186,7 +186,7 @@ tokenizer.save("tokenizer.pt")
 tokenizer = RQVAETokenizer.load("tokenizer.pt")
 ```
 
-The `forward` pass returns a dict with keys `recon` (reconstruction), `commitment_loss`, and `codes`.
+The `forward` pass returns an `RQVAEOutput` NamedTuple with fields `recon` (reconstruction), `commitment_loss`, `codes`, and `p_unique_ids` (fraction of distinct token tuples in the batch).
 
 ## Constrained Decoding
 
@@ -199,10 +199,10 @@ A trie over all valid item token sequences, stored in Compressed Sparse Row (CSR
 ```python
 from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 
-# Build from a TokenSequence of all items
+# Build from the codes tensor of all items
 sem_ids = tokenizer.encode(all_item_features)
 trie = CompactCSRTrie.from_sorted_batch(
-    sem_ids,
+    sem_ids.codes,
     vocab_size=256,
     dense_lookup_layers=2,
 )

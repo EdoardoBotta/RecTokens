@@ -20,10 +20,14 @@ import unittest
 
 import torch
 import torch.nn as nn
+from tokenizers import Tokenizer as _BackendTokenizer
+from tokenizers.models import WordLevel as _WordLevel
+from tokenizers.pre_tokenizers import FixedLength as _FixedLength
+from transformers import PreTrainedTokenizerFast
 
 from rectokens.core.tokenizer import TokenSequence
 from rectokens.integrations.hf.collator import InterleavedSequenceCollator
-from rectokens.integrations.hf.model import resize_and_initialize
+from rectokens.integrations.hf.model import ItemAwareCausalLM, resize_and_initialize
 from rectokens.integrations.hf.tokenizer import ItemAwareTokenizer
 from rectokens.tokenizers.rq_kmeans import RQKMeansTokenizer
 from rectokens.tokenizers.rqvae import RQVAETokenizer
@@ -44,44 +48,27 @@ N_ITEMS = 200
 # ---------------------------------------------------------------------------
 
 
-class _MockHFTokenizer:
-    """Character-level mock of HuggingFace PreTrainedTokenizer.
+def _make_char_fast_tok() -> PreTrainedTokenizerFast:
+    """Character-level ``PreTrainedTokenizerFast`` for testing.
 
     Vocab layout: 0=<pad>, 1=<unk>, 2..N = printable ASCII characters.
+    Each input character is encoded as its own token (Split pre-tokenizer).
     """
+    chars = "abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ.,!?"
+    vocab: dict[str, int] = {"<pad>": 0, "<unk>": 1}
+    for ch in chars:
+        if ch not in vocab:
+            vocab[ch] = len(vocab)
 
-    def __init__(self) -> None:
-        chars = "abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ.,!?"
-        self._vocab: dict[str, int] = {"<pad>": 0, "<unk>": 1}
-        self._inv_vocab: dict[int, str] = {0: "<pad>", 1: "<unk>"}
-        for ch in chars:
-            if ch not in self._vocab:
-                idx = len(self._vocab)
-                self._vocab[ch] = idx
-                self._inv_vocab[idx] = ch
-        self.unk_token_id = 1
+    backend = _BackendTokenizer(_WordLevel(vocab=vocab, unk_token="<unk>"))
+    # FixedLength(1) splits into single-character chunks — true character-level encoding.
+    backend.pre_tokenizer = _FixedLength(length=1)
 
-    def __len__(self) -> int:
-        return len(self._vocab)
-
-    def convert_tokens_to_ids(self, token: str) -> int:
-        return self._vocab.get(token, self.unk_token_id)
-
-    def add_tokens(self, tokens: list[str], special_tokens: bool = False) -> int:
-        added = 0
-        for tok in tokens:
-            if tok not in self._vocab:
-                idx = len(self._vocab)
-                self._vocab[tok] = idx
-                self._inv_vocab[idx] = tok
-                added += 1
-        return added
-
-    def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
-        return [self._vocab.get(c, self.unk_token_id) for c in text]
-
-    def decode(self, ids: list[int]) -> str:
-        return "".join(self._inv_vocab.get(i, "?") for i in ids)
+    return PreTrainedTokenizerFast(
+        tokenizer_object=backend,
+        pad_token="<pad>",
+        unk_token="<unk>",
+    )
 
 
 class _MockHFModel(nn.Module):
@@ -131,7 +118,7 @@ def _make_aware(hf_tok=None, item_tok=None) -> tuple[ItemAwareTokenizer, torch.T
         )
         item_tok.fit_step(data)
     if hf_tok is None:
-        hf_tok = _MockHFTokenizer()
+        hf_tok = _make_char_fast_tok()
     aware = ItemAwareTokenizer(hf_tok, item_tok, NUM_LEVELS, CODEBOOK_SIZE)
     return aware, data
 
@@ -592,7 +579,7 @@ class TestResizeAndInitialize(unittest.TestCase):
         )
         rqvae_tok._fitted = True
 
-        hf_tok = _MockHFTokenizer()
+        hf_tok = _make_char_fast_tok()
         aware = ItemAwareTokenizer(hf_tok, rqvae_tok, NUM_LEVELS, CODEBOOK_SIZE)
         orig = aware.original_vocab_size
 
@@ -610,6 +597,56 @@ class TestResizeAndInitialize(unittest.TestCase):
                 assert torch.allclose(expected, actual, atol=1e-6), (
                     f"Embedding mismatch at level={l} code={c}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# ItemAwareCausalLM.from_causal_lm tests
+# ---------------------------------------------------------------------------
+
+
+class TestFromCausalLM(unittest.TestCase):
+    """Verify ItemAwareCausalLM.from_causal_lm factory method."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.aware, _ = _make_aware()
+
+    def _make_inner(self) -> _MockHFModel:
+        return _MockHFModel(self.aware.original_vocab_size, HIDDEN_SIZE)
+
+    def test_returns_item_aware_causal_lm(self) -> None:
+        model = ItemAwareCausalLM.from_causal_lm(self._make_inner(), self.aware)
+        assert isinstance(model, ItemAwareCausalLM)
+
+    def test_inner_vocab_size_matches_extended_vocab(self) -> None:
+        model = ItemAwareCausalLM.from_causal_lm(self._make_inner(), self.aware)
+        actual = model.model.get_input_embeddings().weight.shape[0]
+        assert actual == self.aware.vocab_size
+
+    def test_lm_head_resized(self) -> None:
+        model = ItemAwareCausalLM.from_causal_lm(self._make_inner(), self.aware)
+        assert (
+            model.model.get_output_embeddings().weight.shape[0] == self.aware.vocab_size
+        )
+
+    def test_config_num_levels(self) -> None:
+        model = ItemAwareCausalLM.from_causal_lm(self._make_inner(), self.aware)
+        assert model.config.num_levels == self.aware.num_levels
+
+    def test_config_codebook_size(self) -> None:
+        model = ItemAwareCausalLM.from_causal_lm(self._make_inner(), self.aware)
+        assert model.config.codebook_size == self.aware.codebook_size
+
+    def test_preloaded_module_used_directly(self) -> None:
+        inner = self._make_inner()
+        model = ItemAwareCausalLM.from_causal_lm(inner, self.aware)
+        assert model.model is inner
+
+    def test_embedding_delegation(self) -> None:
+        """get_input/output_embeddings on the wrapper delegate to inner model."""
+        model = ItemAwareCausalLM.from_causal_lm(self._make_inner(), self.aware)
+        assert model.get_input_embeddings() is model.model.get_input_embeddings()
+        assert model.get_output_embeddings() is model.model.get_output_embeddings()
 
 
 if __name__ == "__main__":

@@ -105,16 +105,14 @@ def train(args: argparse.Namespace) -> RQVAETokenizer:
             optimizer.zero_grad()
 
             out = model(x)
-            recon_loss = (
-                F.mse_loss(out["recon"], x, reduction="none").sum(dim=-1).mean()
-            )
-            commit_loss = out["commitment_loss"]
+            recon_loss = F.mse_loss(out.recon, x, reduction="none").sum(dim=-1).mean()
+            commit_loss = out.commitment_loss
             (recon_loss + commit_loss).backward()
             optimizer.step()
 
             total_recon += recon_loss.item()
             total_commit += commit_loss.item()
-            total_unique += out["p_unique_ids"].item()
+            total_unique += out.p_unique_ids.item()
 
         if epoch % args.log_every == 0:
             n = len(loader)

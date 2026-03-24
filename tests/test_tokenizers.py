@@ -36,7 +36,7 @@ def _train_rqvae(
         idx = torch.randint(0, n, (BATCH_SIZE,))
         x = data[idx]
         out = tok(x)
-        loss = F.mse_loss(out["recon"], x) + out["commitment_loss"]
+        loss = F.mse_loss(out.recon, x) + out.commitment_loss
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -166,9 +166,9 @@ class TestTokenizers(unittest.TestCase):
             codebook_size=CODEBOOK_SIZE,
         )
         out = tok(torch.randn(8, DIM))
-        assert out["recon"].shape == (8, DIM)
-        assert out["commitment_loss"].shape == ()
-        assert out["codes"].shape == (8, NUM_LEVELS)
+        assert out.recon.shape == (8, DIM)
+        assert out.commitment_loss.shape == ()
+        assert out.codes.shape == (8, NUM_LEVELS)
 
     def test_rqvae_loss_decreases(self) -> None:
         assert self.rqvae_losses[0] > self.rqvae_losses[-1]
