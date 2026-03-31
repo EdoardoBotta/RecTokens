@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="rectokens_logo_v2.svg" alt="RecTokens" width="100%"/>
+  <img src="assets/rectokens_logo_v2.svg" alt="RecTokens" width="100%"/>
 </p>
 
 # RecTokens
