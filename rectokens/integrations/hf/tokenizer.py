@@ -43,48 +43,40 @@ class ItemAwareTokenizer(PreTrainedTokenizerFast):
             self.processor = None
             text_tokenizer = hf_tokenizer
 
-        # Extract the tokenizers.Tokenizer backend and initialise the HF base class.
-        # Special tokens are forwarded explicitly so they are preserved after re-init.
-        # Use getattr with defaults for compatibility across transformers versions.
+        # Capture original vocab size before item tokens are added.
+        self._original_vocab_size = len(text_tokenizer)
+
+        item_tokens = [
+            f"<item_L{l}_C{c}>"
+            for l in range(num_levels)
+            for c in range(codebook_size)
+        ] + ["<item_start>"]  # separator: between end-of-text and item semantic IDs
+
+        existing = getattr(text_tokenizer, "additional_special_tokens", []) or []
+        # Preserve order; skip duplicates so checkpoint reloads are idempotent.
+        existing_set = set(existing)
+        merged = existing + [t for t in item_tokens if t not in existing_set]
+
         super().__init__(
             tokenizer_object=text_tokenizer._tokenizer,
             bos_token=getattr(text_tokenizer, "bos_token", None),
             eos_token=getattr(text_tokenizer, "eos_token", None),
             unk_token=getattr(text_tokenizer, "unk_token", None),
             pad_token=getattr(text_tokenizer, "pad_token", None),
-            additional_special_tokens=getattr(
-                text_tokenizer, "additional_special_tokens", []
-            )
-            or [],
+            additional_special_tokens=merged,
         )
+
+        assert self.convert_tokens_to_ids("<item_L0_C0>") == self._original_vocab_size
 
         self.item_tokenizer = item_tokenizer
         self.num_levels = num_levels
         self.codebook_size = codebook_size
-
-        # Save BEFORE registration so item_token_id offsets are stable.
-        self._original_vocab_size = len(self)
-
-        self._register_item_tokens()
 
     def __call__(self, *args, **kwargs):
         # Delegate to the processor for multimodal models, or the base class otherwise.
         if self.processor is not None:
             return self.processor(*args, **kwargs)
         return super().__call__(*args, **kwargs)
-
-    def _register_item_tokens(self) -> None:
-        # Skip if already registered (e.g. checkpoint reload).
-        probe_id = self.convert_tokens_to_ids("<item_L0_C0>")
-        if probe_id != self.unk_token_id:
-            return
-        new_tokens = [
-            f"<item_L{l}_C{c}>"
-            for l in range(self.num_levels)
-            for c in range(self.codebook_size)
-        ] + ["<item_start>"]  # separator: between end-of-text and item semantic IDs
-        self.add_tokens(new_tokens, special_tokens=True)
-        assert self.convert_tokens_to_ids("<item_L0_C0>") == self._original_vocab_size
 
     def item_token_id(self, level: int, code: int) -> int:
         """Return the HF vocab id for item level ``level``, code ``code``."""

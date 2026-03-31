@@ -53,7 +53,7 @@ Choose **RQKMeans** (fast, no GPU required) or **RQVAE** (better reconstruction,
 
 **RQKMeans:**
 ```bash
-python scripts/training/train_rqkmeans.py \
+python train_rqkmeans.py \
     --root data/amazon --split beauty \
     --num_levels 3 --codebook_size 256 \
     --num_epochs 20 --batch_size 640 \
@@ -63,7 +63,7 @@ python scripts/training/train_rqkmeans.py \
 
 **RQVAE:**
 ```bash
-python scripts/training/train_rqvae.py \
+python train_rqvae.py \
     --root data/amazon --split beauty \
     --latent_dim 64 --hidden_dim 512 \
     --num_levels 3 --codebook_size 256 \
@@ -247,7 +247,7 @@ The core primitive for constrained decoding is a masked linear projection. Two i
 The `benchmark_vtnk.py` script benchmarks constrained decoding implementations across batch sizes (`B ∈ {32, 256, 1024}`) and vocabulary sizes (`N ∈ {512, 1024, 8192, 150000}`). The fused Triton kernel provides 10–100× speedup over CPU trie traversal at large vocabulary and batch sizes.
 
 ```bash
-python scripts/benchmark/benchmark_vtnk.py
+python benchmark_vtnk.py
 # Results saved to out/heatmap_*.jpg
 ```
 
@@ -323,7 +323,7 @@ Uses a FAISS `IndexFlatL2` GPU index built once from the codebook (`make_gpu_ind
 ### Benchmark setup
 
 ```bash
-python scripts/benchmark/benchmark_nn_quantize.py
+python benchmark_nn_quantize.py
 # CSV results: out/bench_nn_quantize_N{N}.csv
 # Heatmaps:    out/heatmap_*.jpg
 ```
@@ -422,7 +422,7 @@ aware_tokenizer = ItemAwareTokenizer(
     num_levels=3,
     codebook_size=256,
 )
-# vocab now includes 3×256 = 768 new item tokens: <item_L0_C0> … <item_L2_C255>
+# vocab now includes 3×256 + 1 = 769 new tokens: <item_L0_C0> … <item_L2_C255> + <item_start>
 
 # 3. Load model and resize embeddings to the extended vocab
 model = AutoModelForCausalLM.from_pretrained(
@@ -529,12 +529,12 @@ generated = autoregressive_generate(
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/training/train_rqkmeans.py` | Train `RQKMeansTokenizer` on Amazon item embeddings |
-| `scripts/training/train_rqvae.py` | Train `RQVAETokenizer` on Amazon item embeddings |
+| `train_rqkmeans.py` | Train `RQKMeansTokenizer` on Amazon item embeddings |
+| `train_rqvae.py` | Train `RQVAETokenizer` on Amazon item embeddings |
 | `precompute_sequences.py` | Encode items + assemble interleaved token-ID sequences for all users |
 | `finetune_qwen.py` | Finetune Qwen on precomputed sequences via HF `Trainer` |
-| `scripts/benchmark/benchmark_vtnk.py` | Benchmark constrained decoding implementations |
-| `scripts/benchmark/benchmark_nn_quantize.py` | Benchmark nearest-neighbor quantization kernels |
+| `benchmark_vtnk.py` | Benchmark constrained decoding implementations |
+| `benchmark_nn_quantize.py` | Benchmark nearest-neighbor quantization kernels |
 
 ## Module Structure
 
@@ -560,16 +560,14 @@ examples/
                         # PrecomputedSequenceDataset
 
 scripts/
-├── training/
-│   ├── train_rqkmeans.py
-│   └── train_rqvae.py
-├── benchmark/
-│   ├── benchmark_vtnk.py
-│   └── benchmark_nn_quantize.py
 └── preprocessing/      # (reserved)
 
+train_rqkmeans.py       # Train RQKMeansTokenizer on Amazon item embeddings
+train_rqvae.py          # Train RQVAETokenizer on Amazon item embeddings
 precompute_sequences.py # Precompute interleaved token-ID sequences
 finetune_qwen.py        # Finetune Qwen via HF Trainer on precomputed data
+benchmark_vtnk.py       # Benchmark constrained decoding implementations
+benchmark_nn_quantize.py # Benchmark nearest-neighbor quantization kernels
 ```
 
 ## Key Types
