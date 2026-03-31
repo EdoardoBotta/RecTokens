@@ -1,7 +1,7 @@
 """Train an RQVAETokenizer on Amazon item embeddings.
 
 Usage:
-    python examples/training/train_rqvae.py \
+    python train_rqvae.py \
         --root data/amazon --split beauty \
         --latent_dim 64 --hidden_dim 512 \
         --num_levels 3 --codebook_size 256 \
