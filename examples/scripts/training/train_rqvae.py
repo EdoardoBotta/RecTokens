@@ -10,12 +10,12 @@ import os
 
 import gin
 import torch
-import torch.nn.functional as F
 from torch.optim import AdamW
-from torch.utils.data import BatchSampler, DataLoader, RandomSampler
+from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 
 from examples.data.amazon import ItemData
 from examples.utils import parse_config
+from examples.scripts.training.utils import recon_loss, run_eval
 from rectokens.tokenizers.rqvae import RQVAETokenizer
 
 
@@ -42,13 +42,27 @@ def train(
     weight_decay: float = 1e-4,
     log_every: int = 1,
     save_every: int = 10,
+    eval_every_n: int = 0,
     output_dir: str = "checkpoints/rqvae",
+    learnable_codebook: bool = False,
 ) -> RQVAETokenizer:
     device = get_device()
     print(f"Training on: {device}")
 
     dataset = ItemData(root=root, split=split, train_test_split=train_test_split)
     print(f"Dataset: {len(dataset)} items, dim={dataset[0].x.shape[0]}")
+
+    eval_loader = None
+    if eval_every_n > 0:
+        eval_dataset = ItemData(root=root, split=split, train_test_split="eval")
+        print(f"Eval dataset: {len(eval_dataset)} items")
+        eval_sampler = BatchSampler(SequentialSampler(eval_dataset), batch_size, False)
+        eval_loader = DataLoader(
+            eval_dataset,
+            sampler=eval_sampler,
+            batch_size=None,
+            collate_fn=lambda batch: batch,
+        )
 
     input_dim = dataset[0].x.shape[0]
     model = RQVAETokenizer(
@@ -57,7 +71,7 @@ def train(
         hidden_dim=hidden_dim,
         num_levels=num_levels,
         codebook_size=codebook_size,
-        learnable_codebook=False,
+        learnable_codebook=learnable_codebook,
     ).to(device)
 
     # AdamW only sees encoder + decoder weights — codebook embeddings are
@@ -82,12 +96,12 @@ def train(
             optimizer.zero_grad()
 
             out = model(x)
-            recon_loss = F.mse_loss(out.recon, x, reduction="none").sum(dim=-1).mean()
+            r_loss = recon_loss(out.recon, x)
             commit_loss = out.commitment_loss
-            (recon_loss + commit_loss).backward()
+            (r_loss + commit_loss).backward()
             optimizer.step()
 
-            total_recon += recon_loss.item()
+            total_recon += r_loss.item()
             total_commit += commit_loss.item()
             total_unique += out.p_unique_ids.item()
 
@@ -99,6 +113,29 @@ def train(
                 f"  commit={total_commit / n:.4f}"
                 f"  total={(total_recon + total_commit) / n:.4f}"
                 f"  p_unique={total_unique / n:.3f}"
+            )
+
+        if eval_every_n > 0 and epoch % eval_every_n == 0:
+            model.eval()
+
+            def _step(x):
+                x = x.to(device)
+                out = model(x)
+                return recon_loss(out.recon, x), out.commitment_loss, out.codes
+
+            stats = run_eval(eval_loader, _step, num_levels, codebook_size)
+            model.train()
+            entropy_str = "  ".join(
+                f"H{lvl}={e:.4f}" for lvl, e in enumerate(stats["entropies"])
+            )
+            avg_recon, avg_commit = stats["avg_recon"], stats["avg_commit"]
+            print(
+                f"[eval] epoch {epoch:3d}/{num_epochs}"
+                f"  recon={avg_recon:.4f}"
+                f"  commit={avg_commit:.4f}"
+                f"  total={avg_recon + avg_commit:.4f}"
+                f"  p_unique={stats['p_unique']:.3f}"
+                f"  {entropy_str}"
             )
 
         if save_every > 0 and epoch % save_every == 0:

@@ -95,11 +95,8 @@ Fits codebooks via mini-batch K-means. No training loop required — call `fit_s
 
 ```python
 from rectokens.tokenizers.rq_kmeans import RQKMeansTokenizer
-from rectokens.datasets import NumpyDataset
 import numpy as np
-
-data = np.random.randn(10_000, 128).astype("float32")
-dataset = NumpyDataset(data)
+import torch
 
 tokenizer = RQKMeansTokenizer(
     num_levels=3,       # number of RQ levels (token sequence length)
@@ -107,10 +104,10 @@ tokenizer = RQKMeansTokenizer(
     dim=128,            # embedding dimension
 )
 
-for batch in dataset.iter_batches(batch_size=256):
-    tokenizer.fit_step(batch)
+data = torch.from_numpy(np.random.randn(10_000, 128).astype("float32"))
+for start in range(0, len(data), 256):
+    tokenizer.fit_step(data[start : start + 256])
 
-import torch
 features = torch.randn(8, 128)
 tokens = tokenizer.encode(features)   # TokenSequence, codes shape: (8, 3)
 reconstructed = tokenizer.decode(tokens)  # Tensor shape: (8, 128)
@@ -510,10 +507,9 @@ rectokens/
 ├── ops/                # Python wrappers for kernels
 ├── kernels/            # Triton GPU kernels
 ├── modules/            # SparseLinear, ConstraintEnforcer (PyTorch modules)
-├── integrations/
-│   └── hf/             # ItemAwareTokenizer, InterleavedSequenceCollator,
-│                       # PrecomputedSequenceCollator, ItemAwareCausalLM
-└── datasets.py         # NumpyDataset, TensorDataset
+└── integrations/
+    └── hf/             # ItemAwareTokenizer, InterleavedSequenceCollator,
+                        # PrecomputedSequenceCollator, ItemAwareCausalLM
 
 examples/
 ├── configs/

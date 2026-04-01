@@ -17,21 +17,6 @@ class RQKMeansTokenizer(Tokenizer):
     item that can be used as a discrete item ID in recommendation models
     (e.g. as input to an auto-regressive Transformer).
 
-    Example::
-
-        from rectokens import RQKMeansTokenizer, NumpyDataset
-        import numpy as np
-
-        data = np.random.randn(10_000, 128).astype("float32")
-        tok = RQKMeansTokenizer(num_levels=3, codebook_size=256, dim=128)
-        dataset = NumpyDataset(data)
-        for batch in dataset.iter_batches(batch_size=256):
-            tok.fit_step(batch)
-
-        features = torch.randn(8, 128)
-        tokens = tok.encode(features)   # TokenSequence  codes: (8, 3)
-        recon  = tok.decode(tokens)     # Tensor (8, 128)
-
     Args:
         num_levels: Number of residual quantization levels ``L``.
         codebook_size: Codebook size at each level ``K``.

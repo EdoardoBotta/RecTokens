@@ -3,14 +3,45 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from typing import Iterator
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from rectokens.datasets import NumpyDataset, TensorDataset
 from rectokens.tokenizers.rq_kmeans import RQKMeansTokenizer
 from rectokens.tokenizers.rqvae import RQVAETokenizer
+
+
+class NumpyDataset:
+    def __init__(self, embeddings: np.ndarray) -> None:
+        self._data = torch.from_numpy(embeddings.astype(np.float32))
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        return self._data[idx]
+
+    def iter_batches(self, batch_size: int = 256) -> Iterator[torch.Tensor]:
+        for start in range(0, len(self._data), batch_size):
+            yield self._data[start : start + batch_size]
+
+
+class TensorDataset:
+    def __init__(self, embeddings: torch.Tensor) -> None:
+        self._data = embeddings.float()
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        return self._data[idx]
+
+    def iter_batches(self, batch_size: int = 256) -> Iterator[torch.Tensor]:
+        for start in range(0, len(self._data), batch_size):
+            yield self._data[start : start + batch_size]
+
 
 N_ITEMS = 512
 DIM = 32

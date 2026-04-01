@@ -12,3 +12,4 @@ train.weight_decay = 1e-4
 train.log_every = 1
 train.save_every = 10
 train.output_dir = "checkpoints/rqvae/sports"
+train.learnable_codebook=False

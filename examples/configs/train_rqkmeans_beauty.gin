@@ -7,4 +7,5 @@ train.num_epochs = 20
 train.batch_size = 640
 train.log_every = 1
 train.save_every = 5
+train.eval_every_n = 5
 train.output_dir = "checkpoints/rqkmeans/beauty"

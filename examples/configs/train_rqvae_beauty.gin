@@ -11,4 +11,6 @@ train.lr = 1e-3
 train.weight_decay = 1e-4
 train.log_every = 1
 train.save_every = 10
+train.eval_every_n = 10
 train.output_dir = "checkpoints/rqvae/beauty"
+train.learnable_codebook=False
