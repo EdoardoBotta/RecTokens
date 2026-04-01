@@ -1,0 +1,14 @@
+main.root = "data/amazon"
+main.split = "beauty"
+main.seq_splits = ("train", "eval", "test")
+main.item_tok_path = "checkpoints/rqvae/beauty/final.pt"
+main.item_tok_type = "rqvae"
+main.num_levels = 3
+main.codebook_size = 256
+main.model_name = "Qwen/Qwen3.5-2B"
+main.max_seq_len = 20
+main.include_future = False
+main.include_item_text = True
+main.build_item_dataset_flag = False
+main.output_dir = "data/precomputed/beauty"
+main.batch_size = 512

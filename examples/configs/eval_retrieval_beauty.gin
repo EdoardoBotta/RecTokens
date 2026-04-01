@@ -1,0 +1,14 @@
+main.model_dir = "checkpoints/qwen/beauty/final"
+main.hf_model_name = "Qwen/Qwen3.5-2B"
+main.item_tok_path = "checkpoints/rqvae/beauty/final.pt"
+main.item_tok_type = "rqvae"
+main.precomputed_test_path = "data/precomputed/beauty/beauty_test.pt"
+main.root = "data/amazon"
+main.split = "beauty"
+main.num_examples = 200
+main.top_k = 10
+main.beam_size = 20
+main.encode_batch_size = 512
+main.bf16 = True
+main.seed = 42
+main.attr_path = None

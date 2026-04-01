@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
@@ -31,7 +31,8 @@ class ItemAwareTokenizer(PreTrainedTokenizerFast):
     def __init__(
         self,
         hf_tokenizer: Any,  # PreTrainedTokenizerFast or processor with .tokenizer
-        item_tokenizer: Tokenizer,
+        item_tokenizer: Optional[Tokenizer] = None,
+        *,
         num_levels: int,
         codebook_size: int,
     ) -> None:
@@ -47,9 +48,7 @@ class ItemAwareTokenizer(PreTrainedTokenizerFast):
         self._original_vocab_size = len(text_tokenizer)
 
         item_tokens = [
-            f"<item_L{l}_C{c}>"
-            for l in range(num_levels)
-            for c in range(codebook_size)
+            f"<item_L{l}_C{c}>" for l in range(num_levels) for c in range(codebook_size)
         ] + ["<item_start>"]  # separator: between end-of-text and item semantic IDs
 
         existing = getattr(text_tokenizer, "additional_special_tokens", []) or []
@@ -108,6 +107,12 @@ class ItemAwareTokenizer(PreTrainedTokenizerFast):
                 # Insert <item_start> separator when transitioning from text → item.
                 if i > 0 and isinstance(parts[i - 1], str):
                     ids.append(self.item_sep_token_id)
+                if self.item_tokenizer is None:
+                    raise RuntimeError(
+                        "encode_sequence received a tensor (item embedding) but "
+                        "item_tokenizer=None. Provide a real item tokenizer to "
+                        "ItemAwareTokenizer when live encoding is required."
+                    )
                 # part: (D,) item embedding tensor — move to tokenizer's device/dtype.
                 # Fall back to CPU float32 for non-Module tokenizers (e.g. RQKMeansTokenizer).
                 try:

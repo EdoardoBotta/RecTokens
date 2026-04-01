@@ -12,7 +12,7 @@ Modern sequential recommendation models treat item retrieval as a language model
 
 1. **Tokenizers** — Convert item feature vectors into discrete token sequences (item IDs).
 2. **Constrained Decoding** — At inference time, efficiently restrict the model's generation to only valid item token sequences.
-3. **HuggingFace Integration** — Plug item tokens directly into any pretrained LLM from HuggingFace. `ItemAwareTokenizer` extends an HF text tokenizer with item-level tokens, `resize_and_initialize` adapts the model's embedding table, and `InterleavedSequenceCollator` / `PrecomputedSequenceCollator` prepare mixed text+item batches for standard HF `Trainer` fine-tuning. This lets you fine-tune models like Qwen on recommendation sequences with minimal boilerplate.
+3. **HuggingFace Integration** — Plug item tokens directly into any pretrained LLM from HuggingFace. `ItemAwareTokenizer` extends an HF text tokenizer with item-level tokens, `ItemAwareCausalLM.from_causal_lm` adapts the model's embedding table, and `InterleavedSequenceCollator` / `PrecomputedSequenceCollator` prepare mixed text+item batches for standard HF `Trainer` fine-tuning. This lets you fine-tune models like Qwen on recommendation sequences with minimal boilerplate.
 
 ### Residual Quantization
 
@@ -53,23 +53,14 @@ Choose **RQKMeans** (fast, no GPU required) or **RQVAE** (better reconstruction,
 
 **RQKMeans:**
 ```bash
-python train_rqkmeans.py \
-    --root data/amazon --split beauty \
-    --num_levels 3 --codebook_size 256 \
-    --num_epochs 20 --batch_size 640 \
-    --save_every 5 --output_dir checkpoints/rqkmeans
-# → checkpoints/rqkmeans/final.pt
+python examples/scripts/training/train_rqkmeans.py examples/configs/train_rqkmeans_beauty.gin
+# → checkpoints/rqkmeans/beauty/final.pt
 ```
 
 **RQVAE:**
 ```bash
-python train_rqvae.py \
-    --root data/amazon --split beauty \
-    --latent_dim 64 --hidden_dim 512 \
-    --num_levels 3 --codebook_size 256 \
-    --num_epochs 100 --batch_size 640 --lr 1e-3 \
-    --save_every 10 --output_dir checkpoints/rqvae
-# → checkpoints/rqvae/final.pt
+python examples/scripts/training/train_rqvae.py examples/configs/train_rqvae_beauty.gin
+# → checkpoints/rqvae/beauty/final.pt
 ```
 
 ### Step 2 — Precompute interleaved sequences
@@ -77,48 +68,30 @@ python train_rqvae.py \
 Encode all item embeddings once with the fitted tokenizer and assemble the flat token-ID sequences for every user (text tokens + semantic ID tokens). This avoids repeated neural-network inference during training.
 
 ```bash
-python precompute_sequences.py \
-    --root data/amazon --split beauty \
-    --seq_splits train,eval \
-    --item_tok_path checkpoints/rqvae/final.pt \
-    --item_tok_type rqvae \
-    --num_levels 3 --codebook_size 256 \
-    --model_name Qwen/Qwen3.5-2B \
-    --max_seq_len 20 \
-    --output_dir data/precomputed/beauty
+python examples/scripts/preprocessing/precompute_sequences.py examples/configs/precompute_sequences_beauty.gin
 # → data/precomputed/beauty/beauty_train.pt
 # → data/precomputed/beauty/beauty_eval.pt
+# → data/precomputed/beauty/beauty_test.pt
 ```
 
-Key flags:
-- `--item_tok_type` — `rqvae` (default) or `rqkmeans`
-- `--seq_splits` — comma-separated list: `train`, `eval`, `test`
-- `--include_future` — append the held-out future item to each sequence
-- `--batch_size` — batch size for item embedding encoding (default 512)
+Key config parameters (`examples/configs/precompute_sequences_beauty.gin`):
+- `main.item_tok_type` — `"rqvae"` (default) or `"rqkmeans"`
+- `main.seq_splits` — tuple of splits: `("train", "eval", "test")`
+- `main.include_future` — append the held-out future item to each sequence
+- `main.batch_size` — batch size for item embedding encoding (default 512)
 
 ### Step 3 — Finetune Qwen on precomputed sequences
 
 ```bash
-python finetune_qwen.py \
-    --model_name Qwen/Qwen3.5-2B \
-    --precomputed_path data/precomputed/beauty/beauty_train.pt \
-    --precomputed_eval_path data/precomputed/beauty/beauty_eval.pt \
-    --num_levels 3 --codebook_size 256 \
-    --batch_size 8 --grad_accum 4 \
-    --num_epochs 3 --lr 2e-4 \
-    --max_length 512 --loss_on all \
-    --bf16 --gradient_checkpointing \
-    --save_every 500 --eval_every 500 \
-    --output_dir checkpoints/qwen \
-    --wandb_project my-project --wandb_run_name beauty-run
-# → checkpoints/qwen/final/
+python examples/scripts/training/finetune_qwen.py examples/configs/finetune_qwen_beauty.gin
+# → checkpoints/qwen/beauty/final/
 ```
 
-Key flags:
-- `--loss_on` — `all` (default), `items`, or `text`
-- `--bf16` / `--gradient_checkpointing` — recommended for GPU training
-- `--wandb_project` / `--wandb_run_name` — optional W&B logging (omit for no logging)
-- `--precomputed_eval_path` — if provided, enables mid-training evaluation
+Key config parameters (`examples/configs/finetune_qwen_beauty.gin`):
+- `train.loss_on` — `"all"` (default), `"items"`, or `"text"`
+- `train.bf16` / `train.gradient_checkpointing` — recommended for GPU training
+- `train.wandb_project` / `train.wandb_run_name` — optional W&B logging (`None` for no logging)
+- `train.precomputed_eval_path` — if set, enables mid-training evaluation
 
 ## Tokenizers
 
@@ -244,10 +217,10 @@ The core primitive for constrained decoding is a masked linear projection. Two i
 
 ## Performance
 
-The `benchmark_vtnk.py` script benchmarks constrained decoding implementations across batch sizes (`B ∈ {32, 256, 1024}`) and vocabulary sizes (`N ∈ {512, 1024, 8192, 150000}`). The fused Triton kernel provides 10–100× speedup over CPU trie traversal at large vocabulary and batch sizes.
+The `examples/scripts/benchmark/benchmark_vtnk.py` script benchmarks constrained decoding implementations across batch sizes (`B ∈ {32, 256, 1024}`) and vocabulary sizes (`N ∈ {512, 1024, 8192, 150000}`). The fused Triton kernel provides 10–100× speedup over CPU trie traversal at large vocabulary and batch sizes.
 
 ```bash
-python benchmark_vtnk.py
+python examples/scripts/benchmark/benchmark_vtnk.py
 # Results saved to out/heatmap_*.jpg
 ```
 
@@ -323,7 +296,7 @@ Uses a FAISS `IndexFlatL2` GPU index built once from the codebook (`make_gpu_ind
 ### Benchmark setup
 
 ```bash
-python benchmark_nn_quantize.py
+python examples/scripts/benchmark/benchmark_nn_quantize.py
 # CSV results: out/bench_nn_quantize_N{N}.csv
 # Heatmaps:    out/heatmap_*.jpg
 ```
@@ -397,7 +370,7 @@ This heatmap is the clearest illustration of `quantize_fwd_mm`'s robustness. Whi
 - **`ItemAwareTokenizer`** — extends a HF text tokenizer with item tokens (`<item_L{l}_C{c}>`), one per level/code pair. Encodes mixed text+item sequences to flat token id lists, decodes them back, and builds a `CompactCSRTrie` over the catalog for constrained generation.
 - **`InterleavedSequenceCollator`** — collates mixed text/item example lists into padded `input_ids`, `attention_mask`, and `labels` tensors ready for `model(**batch)`. Supports `loss_on="all"|"items"|"text"` to mask loss to specific token types.
 - **`PrecomputedSequenceCollator`** — lightweight collator for training on pre-encoded integer tensors produced by `precompute_sequences.py`. No neural-network calls at collation time.
-- **`resize_and_initialize`** (`rectokens.integrations.hf.model`) — resizes the HF model's embedding table and `lm_head` to include item tokens. Optionally initializes item embeddings from projected RQ codebook vectors.
+- **`ItemAwareCausalLM`** (`rectokens.integrations.hf.model`) — wraps any HF causal-LM with item-aware constrained generation. Use `ItemAwareCausalLM.from_causal_lm` to load a model, resize its embedding table and `lm_head` to include item tokens, and optionally initialize item embeddings from projected RQ codebook vectors.
 
 ### Finetuning Qwen on item sequences (online encoding)
 
@@ -405,10 +378,10 @@ Use this path when you want to encode sequences on-the-fly during training, or f
 
 ```python
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from rectokens.integrations.hf.tokenizer import ItemAwareTokenizer
 from rectokens.integrations.hf.collator import InterleavedSequenceCollator
-from rectokens.integrations.hf.model import resize_and_initialize
+from rectokens.integrations.hf.model import ItemAwareCausalLM
 from rectokens.tokenizers.rqvae import RQVAETokenizer
 
 # 1. Load a pre-fitted item tokenizer (frozen)
@@ -425,11 +398,10 @@ aware_tokenizer = ItemAwareTokenizer(
 # vocab now includes 3×256 + 1 = 769 new tokens: <item_L0_C0> … <item_L2_C255> + <item_start>
 
 # 3. Load model and resize embeddings to the extended vocab
-model = AutoModelForCausalLM.from_pretrained(
-    "Qwen/Qwen3.5-2B", torch_dtype=torch.bfloat16
-).cuda()
-resize_and_initialize(model, aware_tokenizer)
 # Optionally pass projection= to initialize item embeddings from RQ codebook vectors
+model = ItemAwareCausalLM.from_causal_lm(
+    "Qwen/Qwen3.5-2B", aware_tokenizer, torch_dtype=torch.bfloat16
+).cuda()
 
 # 4. Build training examples as lists of str | Tensor
 #    Strings are text; Tensors of shape (D,) are item embeddings
@@ -458,14 +430,14 @@ optimizer.step()
 
 ### Training on precomputed sequences
 
-Use `PrecomputedSequenceCollator` with `PrecomputedSequenceDataset` (from `examples.data.amazon`) when training on sequences produced by `precompute_sequences.py`. No item tokenizer neural net is needed at training time.
+Use `PrecomputedSequenceCollator` with `PrecomputedSequenceDataset` (from `examples.data.amazon`) when training on sequences produced by `precompute_sequences.py`. No item tokenizer neural net is needed at training time — omit `item_tokenizer` (defaults to `None`).
 
 ```python
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from rectokens.integrations.hf.tokenizer import ItemAwareTokenizer
 from rectokens.integrations.hf.collator import PrecomputedSequenceCollator
-from rectokens.integrations.hf.model import resize_and_initialize
+from rectokens.integrations.hf.model import ItemAwareCausalLM
 from examples.data.amazon import PrecomputedSequenceDataset
 from torch.utils.data import DataLoader
 
@@ -475,21 +447,16 @@ dataset = PrecomputedSequenceDataset("data/precomputed/beauty/beauty_train.pt")
 # 2. HF tokenizer + ItemAwareTokenizer (no item_tokenizer neural net needed)
 hf_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-2B")
 
-class _DummyItemTokenizer:
-    def parameters(self): return iter([])
-
 aware_tokenizer = ItemAwareTokenizer(
     hf_tokenizer,
-    _DummyItemTokenizer(),
     num_levels=dataset.num_levels,
     codebook_size=dataset.codebook_size,
 )
 
 # 3. Load model and resize embeddings
-model = AutoModelForCausalLM.from_pretrained(
-    "Qwen/Qwen3.5-2B", torch_dtype=torch.bfloat16
+model = ItemAwareCausalLM.from_causal_lm(
+    "Qwen/Qwen3.5-2B", aware_tokenizer, torch_dtype=torch.bfloat16
 ).cuda()
-resize_and_initialize(model, aware_tokenizer)
 
 # 4. Collate precomputed integer sequences
 collator = PrecomputedSequenceCollator(
@@ -529,12 +496,15 @@ generated = autoregressive_generate(
 
 | Script | Purpose |
 |--------|---------|
-| `train_rqkmeans.py` | Train `RQKMeansTokenizer` on Amazon item embeddings |
-| `train_rqvae.py` | Train `RQVAETokenizer` on Amazon item embeddings |
-| `precompute_sequences.py` | Encode items + assemble interleaved token-ID sequences for all users |
-| `finetune_qwen.py` | Finetune Qwen on precomputed sequences via HF `Trainer` |
-| `benchmark_vtnk.py` | Benchmark constrained decoding implementations |
-| `benchmark_nn_quantize.py` | Benchmark nearest-neighbor quantization kernels |
+| `examples/scripts/training/train_rqkmeans.py` | Train `RQKMeansTokenizer` on Amazon item embeddings |
+| `examples/scripts/training/train_rqvae.py` | Train `RQVAETokenizer` on Amazon item embeddings |
+| `examples/scripts/training/finetune_qwen.py` | Finetune Qwen on precomputed sequences via HF `Trainer` |
+| `examples/scripts/preprocessing/precompute_sequences.py` | Encode items + assemble interleaved token-ID sequences for all users |
+| `examples/scripts/eval/eval_retrieval.py` | Evaluate next-item retrieval with constrained beam search |
+| `examples/scripts/benchmark/benchmark_vtnk.py` | Benchmark constrained decoding implementations |
+| `examples/scripts/benchmark/benchmark_nn_quantize.py` | Benchmark nearest-neighbor quantization kernels |
+
+All scripts accept a single positional gin config file. Ready-made configs live in `examples/configs/`.
 
 ## Module Structure
 
@@ -551,23 +521,34 @@ rectokens/
 ├── modules/            # SparseLinear, ConstraintEnforcer (PyTorch modules)
 ├── integrations/
 │   └── hf/             # ItemAwareTokenizer, InterleavedSequenceCollator,
-│                       # PrecomputedSequenceCollator, resize_and_initialize
+│                       # PrecomputedSequenceCollator, ItemAwareCausalLM
 └── datasets.py         # NumpyDataset, TensorDataset
 
 examples/
-└── data/
-    └── amazon.py       # AmazonReviews, ItemData, UserSequenceDataset,
-                        # PrecomputedSequenceDataset
-
-scripts/
-└── preprocessing/      # (reserved)
-
-train_rqkmeans.py       # Train RQKMeansTokenizer on Amazon item embeddings
-train_rqvae.py          # Train RQVAETokenizer on Amazon item embeddings
-precompute_sequences.py # Precompute interleaved token-ID sequences
-finetune_qwen.py        # Finetune Qwen via HF Trainer on precomputed data
-benchmark_vtnk.py       # Benchmark constrained decoding implementations
-benchmark_nn_quantize.py # Benchmark nearest-neighbor quantization kernels
+├── configs/
+│   ├── train_rqvae_beauty.gin        # RQ-VAE tokenizer — Amazon Beauty
+│   ├── train_rqvae_sports.gin        # RQ-VAE tokenizer — Amazon Sports
+│   ├── train_rqkmeans_beauty.gin     # RQ-KMeans tokenizer — Amazon Beauty
+│   ├── train_rqkmeans_sports.gin     # RQ-KMeans tokenizer — Amazon Sports
+│   ├── precompute_sequences_beauty.gin
+│   ├── finetune_qwen_beauty.gin
+│   └── eval_retrieval_beauty.gin
+├── data/
+│   └── amazon.py       # AmazonReviews, ItemData, UserSequenceDataset,
+│                       # PrecomputedSequenceDataset
+├── scripts/
+│   ├── training/
+│   │   ├── train_rqkmeans.py   # Train RQKMeansTokenizer on Amazon item embeddings
+│   │   ├── train_rqvae.py      # Train RQVAETokenizer on Amazon item embeddings
+│   │   └── finetune_qwen.py    # Finetune Qwen via HF Trainer on precomputed data
+│   ├── eval/
+│   │   └── eval_retrieval.py   # Evaluate next-item retrieval with beam search
+│   ├── preprocessing/
+│   │   └── precompute_sequences.py    # Precompute interleaved token-ID sequences
+│   └── benchmark/
+│       ├── benchmark_vtnk.py          # Benchmark constrained decoding
+│       └── benchmark_nn_quantize.py   # Benchmark nearest-neighbor quantization
+└── utils.py            # parse_config() gin helper
 ```
 
 ## Key Types
@@ -579,6 +560,24 @@ benchmark_nn_quantize.py # Benchmark nearest-neighbor quantization kernels
 | `ResidualQuantizerOutput` | Multi-level output: `codes` `(B, L)`, `quantized` `(B, D)`, `level_outputs` |
 | `GenerationConfig` | Beam search config: `steps`, `k`, `beam_size`, `temperature` |
 | `CompactCSRTrie` | GPU-resident CSR trie encoding valid item token sequences |
+
+## Testing
+
+Run the full test suite with:
+
+```bash
+python -m pytest tests/
+```
+
+To run a specific test file:
+
+```bash
+python -m pytest tests/test_constrained_decoding.py
+python -m pytest tests/test_trie.py
+python -m pytest tests/test_kernel.py
+python -m pytest tests/test_tokenizers.py
+python -m pytest tests/test_hf_integration.py
+```
 
 ## References
 

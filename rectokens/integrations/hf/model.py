@@ -13,7 +13,7 @@ from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 from rectokens.schemas.config import GenerationConfig
 
 
-def resize_and_initialize(
+def _resize_and_initialize(
     hf_model: nn.Module,
     item_tokenizer: ItemAwareTokenizer,
     projection: Optional[nn.Module] = None,
@@ -70,12 +70,19 @@ def resize_and_initialize(
 
     tied = lm_head is not None and emb.weight is lm_head.weight
     print(
-        f"[resize_and_initialize] vocab {orig_model_vocab} → {target_vocab} "
+        f"[_resize_and_initialize] vocab {orig_model_vocab} → {target_vocab} "
         f"(+{n_new} item tokens, ids {first_item}–{last_item})  "
         f"lm_head tied={tied}"
     )
 
     if projection is not None:
+        if item_tokenizer.item_tokenizer is None:
+            raise RuntimeError(
+                "_resize_and_initialize: projection-based embedding initialization "
+                "requires codebook access via item_tokenizer.item_tokenizer.rq, "
+                "but item_tokenizer.item_tokenizer is None. "
+                "Provide a real item tokenizer when using projection=."
+            )
         emb = hf_model.get_input_embeddings()
         for l in range(item_tokenizer.num_levels):
             codebook = item_tokenizer.item_tokenizer.rq.levels[l].codebook
@@ -106,9 +113,7 @@ class ItemAwareCausalLM(PreTrainedModel):
     Usage::
 
         hf_model = AutoModelForCausalLM.from_pretrained(...)
-        config = ItemAwareCausalLMConfig(num_levels=4, codebook_size=256)
-        resize_and_initialize(hf_model, aware_tok)
-        model = ItemAwareCausalLM(config, hf_model)
+        model = ItemAwareCausalLM.from_causal_lm(hf_model, aware_tok)
 
         # constrained
         generated = model.generate(input_ids, trie=trie, generation_config=cfg)
@@ -211,7 +216,7 @@ class ItemAwareCausalLM(PreTrainedModel):
     ) -> "ItemAwareCausalLM":
         """Factory: build an ``ItemAwareCausalLM`` from a name/path or pre-loaded model.
 
-        Combines ``AutoModelForCausalLM.from_pretrained``, ``resize_and_initialize``,
+        Combines ``AutoModelForCausalLM.from_pretrained``, ``_resize_and_initialize``,
         and ``ItemAwareCausalLMConfig`` construction into a single call.
 
         Args:
@@ -224,7 +229,7 @@ class ItemAwareCausalLM(PreTrainedModel):
                 already registered).  Its ``num_levels`` and ``codebook_size``
                 attributes are used to build the ``ItemAwareCausalLMConfig``.
             projection: Optional ``nn.Module`` mapping latent codebook vectors to the
-                model's hidden size.  Forwarded verbatim to ``resize_and_initialize``.
+                model's hidden size.  Forwarded verbatim to ``_resize_and_initialize``.
             **kwargs: Passed to ``AutoModelForCausalLM.from_pretrained`` when
                 ``model_name_or_path`` is a string.  Silently ignored otherwise.
 
@@ -249,7 +254,7 @@ class ItemAwareCausalLM(PreTrainedModel):
         else:
             hf_model = model_name_or_path
 
-        resize_and_initialize(hf_model, item_tokenizer, projection=projection)
+        _resize_and_initialize(hf_model, item_tokenizer, projection=projection)
 
         config = ItemAwareCausalLMConfig(
             num_levels=item_tokenizer.num_levels,

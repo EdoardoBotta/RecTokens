@@ -5,30 +5,23 @@ Appends <item_start> to each prompt, runs constrained beam search,
 and reports Recall@1, @5, @10.
 
 Usage:
-    python eval_retrieval.py \
-        --model_dir checkpoints/checkpoint-500 \
-        --hf_model_name Qwen/Qwen3.5-2B \
-        --item_tok_path checkpoints/rqvae/final.pt \
-        --item_tok_type rqvae \
-        --precomputed_test_path data/precomputed/beauty/beauty_test.pt \
-        --root data/amazon --split beauty \
-        --num_examples 10 --top_k 10 --beam_size 20 \
-        --bf16
+    python examples/scripts/eval/eval_retrieval.py examples/configs/eval_retrieval_beauty.gin
 """
 
 from __future__ import annotations
 
-import argparse
 import random
 
+import gin
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 from examples.data.amazon import AmazonReviews
+from examples.utils import parse_config
 from rectokens.tokenizers.rqvae import RQVAETokenizer
 from rectokens.tokenizers.rq_kmeans import RQKMeansTokenizer
 from rectokens.decoding.constrained_decoding import autoregressive_generate
-from rectokens.integrations.hf.model import resize_and_initialize
+from rectokens.integrations.hf.model import ItemAwareCausalLM
 from rectokens.integrations.hf.tokenizer import ItemAwareTokenizer
 from rectokens.schemas.config import GenerationConfig
 
@@ -103,73 +96,31 @@ def generated_ids_to_codes(
     return results
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Eval next-item retrieval with beam search")
-    p.add_argument(
-        "--model_dir",
-        type=str,
-        required=True,
-        help="Path to model checkpoint directory",
-    )
-    p.add_argument(
-        "--hf_model_name",
-        type=str,
-        default=None,
-        help="HF model name for tokenizer (e.g. Qwen/Qwen3.5-2B). "
-        "Falls back to meta in precomputed file.",
-    )
-    p.add_argument(
-        "--item_tok_path",
-        type=str,
-        required=True,
-        help="Path to fitted item tokenizer (.pt)",
-    )
-    p.add_argument(
-        "--item_tok_type", type=str, default="rqvae", choices=["rqvae", "rqkmeans"]
-    )
-    p.add_argument(
-        "--precomputed_test_path",
-        type=str,
-        required=True,
-        help="Path to precomputed test sequences (.pt, include_future=False)",
-    )
-    p.add_argument(
-        "--root",
-        type=str,
-        default="data/amazon",
-        help="Root dir for AmazonReviews (used to get future item IDs)",
-    )
-    p.add_argument(
-        "--split", type=str, default="beauty", choices=["beauty", "sports", "toys"]
-    )
-    p.add_argument("--num_examples", type=int, default=10)
-    p.add_argument("--top_k", type=int, default=10, help="Number of beams to keep")
-    p.add_argument(
-        "--beam_size", type=int, default=20, help="Candidates sampled per beam per step"
-    )
-    p.add_argument("--encode_batch_size", type=int, default=512)
-    p.add_argument("--bf16", action="store_true")
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument(
-        "--attr_path",
-        type=str,
-        default=None,
-        help="Attribute path to lm_head for fused SparseLinear kernel "
-        "(e.g. 'lm_head'). Leave unset to use standard masking.",
-    )
-    return p.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
+@gin.configurable
+def main(
+    model_dir: str = gin.REQUIRED,
+    hf_model_name: str | None = None,
+    item_tok_path: str = gin.REQUIRED,
+    item_tok_type: str = "rqvae",
+    precomputed_test_path: str = gin.REQUIRED,
+    root: str = "data/amazon",
+    split: str = "beauty",
+    num_examples: int = 10,
+    top_k: int = 10,
+    beam_size: int = 20,
+    encode_batch_size: int = 512,
+    bf16: bool = False,
+    seed: int = 42,
+    attr_path: str | None = None,
+) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
     device = get_device()
     print(f"Device: {device}")
 
     # 1. Load precomputed test sequences
-    print(f"Loading precomputed test sequences from {args.precomputed_test_path}")
-    test_data = torch.load(args.precomputed_test_path, weights_only=False)
+    print(f"Loading precomputed test sequences from {precomputed_test_path}")
+    test_data = torch.load(precomputed_test_path, weights_only=False)
     sequences = test_data["sequences"]  # list of 1D long tensors
     num_levels = test_data["num_levels"]
     codebook_size = test_data["codebook_size"]
@@ -184,10 +135,8 @@ def main() -> None:
     )
 
     # 2. Load raw dataset for future item IDs (aligned 1:1 with sequences)
-    print(
-        f"Loading AmazonReviews for future item IDs: root={args.root}, split={args.split}"
-    )
-    raw_data = AmazonReviews(root=args.root, split=args.split)
+    print(f"Loading AmazonReviews for future item IDs: root={root}, split={split}")
+    raw_data = AmazonReviews(root=root, split=split)
     item_embs = raw_data.data["item"]["x"]  # (num_items, D)
     test_history = raw_data.data["user", "rated", "item"].history["test"]
     future_items = test_history["itemId_fut"]  # tensor (num_users,)
@@ -197,14 +146,16 @@ def main() -> None:
     print(f"  {item_embs.shape[0]} items, {len(future_items)} test users")
 
     # 3. Load item tokenizer
-    print(f"Loading item tokenizer ({args.item_tok_type}) from {args.item_tok_path}")
-    item_tok = load_item_tokenizer(args.item_tok_path, args.item_tok_type, device)
+    print(f"Loading item tokenizer ({item_tok_type}) from {item_tok_path}")
+    item_tok = load_item_tokenizer(item_tok_path, item_tok_type, device)
 
     # 4. Build ItemAwareTokenizer
-    hf_model_name = args.hf_model_name or meta.get("model_name", "Qwen/Qwen3.5-2B")
-    print(f"Loading HF tokenizer: {hf_model_name}")
-    hf_tokenizer = AutoTokenizer.from_pretrained(hf_model_name)
-    aware_tok = ItemAwareTokenizer(hf_tokenizer, item_tok, num_levels, codebook_size)
+    resolved_model_name = hf_model_name or meta.get("model_name", "Qwen/Qwen3.5-2B")
+    print(f"Loading HF tokenizer: {resolved_model_name}")
+    hf_tokenizer = AutoTokenizer.from_pretrained(resolved_model_name)
+    aware_tok = ItemAwareTokenizer(
+        hf_tokenizer, item_tok, num_levels=num_levels, codebook_size=codebook_size
+    )
     assert aware_tok.original_vocab_size == original_vocab_size, (
         f"Vocab size mismatch: tokenizer has {aware_tok.original_vocab_size}, "
         f"precomputed file expects {original_vocab_size}"
@@ -212,18 +163,16 @@ def main() -> None:
     print(f"  Vocab: {aware_tok.original_vocab_size} → {aware_tok.vocab_size}")
 
     # 5. Load model
-    dtype = torch.bfloat16 if args.bf16 else torch.float32
-    print(f"Loading model from {args.model_dir} (dtype={dtype})")
-    model = AutoModelForCausalLM.from_pretrained(args.model_dir, torch_dtype=dtype)
+    dtype = torch.bfloat16 if bf16 else torch.float32
+    print(f"Loading model from {model_dir} (dtype={dtype})")
+    model = ItemAwareCausalLM.from_causal_lm(model_dir, aware_tok, torch_dtype=dtype)
     model = model.to(device)
     model.eval()
-    if model.get_input_embeddings().weight.shape[0] != aware_tok.vocab_size:
-        resize_and_initialize(model, aware_tok)
 
     # 6. Encode all items → codes table and lookup dict
     print("Encoding all item embeddings...")
     codes_table = encode_all_items(
-        item_embs, item_tok, aware_tok, args.encode_batch_size, device
+        item_embs, item_tok, aware_tok, encode_batch_size, device
     )  # (num_items, num_levels)
     codes_to_item_id = build_codes_to_item_id(codes_table)
     print(
@@ -242,18 +191,18 @@ def main() -> None:
         if len(sequences[i]) > 0 and int(future_items[i].item()) >= 0
     ]
     sampled_indices = random.sample(
-        valid_indices, min(args.num_examples, len(valid_indices))
+        valid_indices, min(num_examples, len(valid_indices))
     )
     print(f"\nEvaluating {len(sampled_indices)} examples")
 
     # 9. Run evaluation
     gen_config = GenerationConfig(
         steps=num_levels,
-        k=args.top_k,
-        beam_size=args.beam_size,
+        k=top_k,
+        beam_size=beam_size,
         temperature=1.0,
     )
-    cutoffs = [c for c in [1, 5, 10] if c <= args.top_k]
+    cutoffs = [c for c in [1, 5, 10] if c <= top_k]
     recall_at = {c: 0 for c in cutoffs}
 
     item_sep_id = aware_tok.item_sep_token_id
@@ -277,7 +226,7 @@ def main() -> None:
                 trie=trie,
                 input_ids=input_ids,
                 generation_config=gen_config,
-                attr_path=args.attr_path,
+                attr_path=attr_path,
             )
         # generated: (1, k, num_levels)
         generated_beams = generated[0]  # (k, num_levels)
@@ -295,8 +244,8 @@ def main() -> None:
     # 10. Report
     n = len(sampled_indices)
     print("\n" + "=" * 40)
-    print(f"Results on {n} examples  (split={args.split}, seq_split=test)")
-    print(f"Model: {args.model_dir}")
+    print(f"Results on {n} examples  (split={split}, seq_split=test)")
+    print(f"Model: {model_dir}")
     print("=" * 40)
     for cutoff in cutoffs:
         r = recall_at[cutoff] / n
@@ -305,4 +254,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    parse_config()
     main()

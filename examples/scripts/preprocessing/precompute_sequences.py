@@ -7,24 +7,19 @@ to disk.  Training can then load pre-encoded integer tensors directly, avoiding
 any neural-network inference at training time.
 
 Usage:
-    python precompute_sequences.py \
-        --root data/amazon --split beauty \
-        --seq_splits train,test \
-        --item_tok_path checkpoints/rqvae/final.pt \
-        --num_levels 3 --codebook_size 256 \
-        --model_name Qwen/Qwen3.5-2B \
-        --output_dir data/precomputed/beauty
+    python examples/scripts/preprocessing/precompute_sequences.py examples/configs/precompute_sequences_beauty.gin
 """
 
 from __future__ import annotations
 
-import argparse
 import os
 
+import gin
 import torch
 from transformers import AutoTokenizer
 
 from examples.data.amazon import AmazonReviews
+from examples.utils import parse_config
 from rectokens.integrations.hf.tokenizer import ItemAwareTokenizer
 from rectokens.tokenizers.rqvae import RQVAETokenizer
 
@@ -35,72 +30,6 @@ def get_device() -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
-
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Precompute interleaved token-ID sequences")
-    p.add_argument("--root", type=str, default="data/amazon")
-    p.add_argument(
-        "--split",
-        type=str,
-        default="beauty",
-        choices=["beauty", "sports", "toys", "yelp"],
-    )
-    p.add_argument(
-        "--seq_splits",
-        type=str,
-        default="train,eval",
-        help="Comma-separated sequence splits to precompute, e.g. train,eval,test",
-    )
-    p.add_argument(
-        "--item_tok_path",
-        type=str,
-        required=True,
-        help="Path to fitted .pt item tokenizer (RQVAETokenizer)",
-    )
-    p.add_argument(
-        "--item_tok_type", type=str, default="rqvae", choices=["rqvae", "rqkmeans"]
-    )
-    p.add_argument("--num_levels", type=int, default=3)
-    p.add_argument("--codebook_size", type=int, default=256)
-    p.add_argument(
-        "--model_name",
-        type=str,
-        default="Qwen/Qwen3.5-2B",
-        help="HuggingFace model name for the text tokenizer",
-    )
-    p.add_argument("--max_seq_len", type=int, default=20)
-    p.add_argument(
-        "--include_future",
-        action="store_true",
-        help="Append the future item to each sequence",
-    )
-    p.add_argument(
-        "--include_item_text",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Include item text tokens in sequences (default: True). "
-        "When --no-include_item_text is set, sequences contain only "
-        "concatenated semantic IDs: <sep><semid_0>...<semid_L-1> per item.",
-    )
-    p.add_argument(
-        "--build_item_dataset",
-        action="store_true",
-        help="Also build a per-item dataset of <semid> <text> sequences (one entry per item).",
-    )
-    p.add_argument(
-        "--output_dir",
-        type=str,
-        required=True,
-        help="Directory where output .pt files will be written",
-    )
-    p.add_argument(
-        "--batch_size",
-        type=int,
-        default=512,
-        help="Batch size for item embedding encoding",
-    )
-    return p.parse_args()
 
 
 def load_item_tokenizer(path: str, tok_type: str, device: torch.device):
@@ -264,55 +193,68 @@ def precompute_split(
     return results
 
 
-def main() -> None:
-    args = parse_args()
+@gin.configurable
+def main(
+    root: str = "data/amazon",
+    split: str = "beauty",
+    seq_splits: tuple = ("train", "eval"),
+    item_tok_path: str = gin.REQUIRED,
+    item_tok_type: str = "rqvae",
+    num_levels: int = 3,
+    codebook_size: int = 256,
+    model_name: str = "Qwen/Qwen3.5-2B",
+    max_seq_len: int = 20,
+    include_future: bool = False,
+    include_item_text: bool = True,
+    build_item_dataset_flag: bool = False,
+    output_dir: str = gin.REQUIRED,
+    batch_size: int = 512,
+) -> None:
     device = get_device()
     print(f"Using device: {device}")
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
     # 1. Load dataset
-    print(f"Loading AmazonReviews: root={args.root}, split={args.split}")
-    raw_data = AmazonReviews(root=args.root, split=args.split)
+    print(f"Loading AmazonReviews: root={root}, split={split}")
+    raw_data = AmazonReviews(root=root, split=split)
     item_embs = raw_data.data["item"]["x"]  # (num_items, D)
     print(f"  {item_embs.shape[0]} items, embedding dim={item_embs.shape[1]}")
 
     # 2. Load item tokenizer (frozen)
-    print(
-        f"Loading item tokenizer from {args.item_tok_path} (type={args.item_tok_type})"
-    )
-    item_tok = load_item_tokenizer(args.item_tok_path, args.item_tok_type, device)
+    print(f"Loading item tokenizer from {item_tok_path} (type={item_tok_type})")
+    item_tok = load_item_tokenizer(item_tok_path, item_tok_type, device)
 
     # 3. Build ItemAwareTokenizer (registers item tokens in HF vocab)
-    print(f"Loading HF tokenizer: {args.model_name}")
-    hf_tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    print(f"Loading HF tokenizer: {model_name}")
+    hf_tokenizer = AutoTokenizer.from_pretrained(model_name)
     aware_tok = ItemAwareTokenizer(
-        hf_tokenizer, item_tok, args.num_levels, args.codebook_size
+        hf_tokenizer, item_tok, num_levels=num_levels, codebook_size=codebook_size
     )
     print(f"  Vocab size: {aware_tok.original_vocab_size} → {aware_tok.vocab_size}")
 
     # 4. Encode ALL item embeddings once
     print("Encoding all item embeddings...")
     codes_table = encode_all_items(
-        item_embs, item_tok, aware_tok, args.batch_size, device
+        item_embs, item_tok, aware_tok, batch_size, device
     )  # (num_items, num_levels)
 
     # 5. Optionally build per-item <semid> <text> dataset
-    if args.build_item_dataset:
+    if build_item_dataset_flag:
         print("\nBuilding per-item <semid> <text> dataset...")
         item_texts = raw_data.data["item"]["text"]
         item_sequences = build_item_dataset(codes_table, item_texts, aware_tok)
-        out_path = os.path.join(args.output_dir, f"{args.split}_items.pt")
+        out_path = os.path.join(output_dir, f"{split}_items.pt")
         torch.save(
             {
                 "sequences": item_sequences,
                 "original_vocab_size": aware_tok.original_vocab_size,
-                "num_levels": args.num_levels,
-                "codebook_size": args.codebook_size,
+                "num_levels": num_levels,
+                "codebook_size": codebook_size,
                 "meta": {
-                    "split": args.split,
-                    "model_name": args.model_name,
-                    "item_tok_path": args.item_tok_path,
+                    "split": split,
+                    "model_name": model_name,
+                    "item_tok_path": item_tok_path,
                 },
             },
             out_path,
@@ -320,7 +262,6 @@ def main() -> None:
         print(f"  Saved {len(item_sequences)} item sequences to {out_path}")
 
     # 6. For each user seq_split, assemble sequences and save
-    seq_splits = [s.strip() for s in args.seq_splits.split(",") if s.strip()]
     for seq_split in seq_splits:
         print(f"\nPrecomputing sequences for seq_split='{seq_split}'...")
         sequences = precompute_split(
@@ -328,25 +269,25 @@ def main() -> None:
             raw_data=raw_data,
             codes_table=codes_table,
             aware_tok=aware_tok,
-            max_seq_len=args.max_seq_len,
-            include_future=args.include_future,
-            include_item_text=args.include_item_text,
+            max_seq_len=max_seq_len,
+            include_future=include_future,
+            include_item_text=include_item_text,
         )
 
-        out_path = os.path.join(args.output_dir, f"{args.split}_{seq_split}.pt")
+        out_path = os.path.join(output_dir, f"{split}_{seq_split}.pt")
         payload = {
             "sequences": sequences,
             "original_vocab_size": aware_tok.original_vocab_size,
-            "num_levels": args.num_levels,
-            "codebook_size": args.codebook_size,
+            "num_levels": num_levels,
+            "codebook_size": codebook_size,
             "meta": {
-                "split": args.split,
+                "split": split,
                 "seq_split": seq_split,
-                "model_name": args.model_name,
-                "item_tok_path": args.item_tok_path,
-                "max_seq_len": args.max_seq_len,
-                "include_future": args.include_future,
-                "include_item_text": args.include_item_text,
+                "model_name": model_name,
+                "item_tok_path": item_tok_path,
+                "max_seq_len": max_seq_len,
+                "include_future": include_future,
+                "include_item_text": include_item_text,
             },
         }
         torch.save(payload, out_path)
@@ -356,4 +297,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    parse_config()
     main()
