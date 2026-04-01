@@ -53,14 +53,12 @@ Choose **RQKMeans** (fast, no GPU required) or **RQVAE** (better reconstruction,
 
 **RQKMeans:**
 ```bash
-python examples/scripts/training/train_rqkmeans.py examples/configs/train_rqkmeans_beauty.gin
-# → checkpoints/rqkmeans/beauty/final.pt
+python -m examples.scripts.training.train_rqkmeans examples/configs/train_rqkmeans_beauty.gin
 ```
 
 **RQVAE:**
 ```bash
-python examples/scripts/training/train_rqvae.py examples/configs/train_rqvae_beauty.gin
-# → checkpoints/rqvae/beauty/final.pt
+python -m examples.scripts.training.train_rqvae examples/configs/train_rqvae_beauty.gin
 ```
 
 ### Step 2 — Precompute interleaved sequences
@@ -68,10 +66,7 @@ python examples/scripts/training/train_rqvae.py examples/configs/train_rqvae_bea
 Encode all item embeddings once with the fitted tokenizer and assemble the flat token-ID sequences for every user (text tokens + semantic ID tokens). This avoids repeated neural-network inference during training.
 
 ```bash
-python examples/scripts/preprocessing/precompute_sequences.py examples/configs/precompute_sequences_beauty.gin
-# → data/precomputed/beauty/beauty_train.pt
-# → data/precomputed/beauty/beauty_eval.pt
-# → data/precomputed/beauty/beauty_test.pt
+python -m examples.scripts.preprocessing.precompute_sequences examples/configs/precompute_sequences_beauty.gin
 ```
 
 Key config parameters (`examples/configs/precompute_sequences_beauty.gin`):
@@ -83,8 +78,7 @@ Key config parameters (`examples/configs/precompute_sequences_beauty.gin`):
 ### Step 3 — Finetune Qwen on precomputed sequences
 
 ```bash
-python examples/scripts/training/finetune_qwen.py examples/configs/finetune_qwen_beauty.gin
-# → checkpoints/qwen/beauty/final/
+python -m examples.scripts.training.finetune_qwen examples/configs/finetune_qwen_beauty.gin
 ```
 
 Key config parameters (`examples/configs/finetune_qwen_beauty.gin`):
@@ -220,8 +214,7 @@ The core primitive for constrained decoding is a masked linear projection. Two i
 The `examples/scripts/benchmark/benchmark_vtnk.py` script benchmarks constrained decoding implementations across batch sizes (`B ∈ {32, 256, 1024}`) and vocabulary sizes (`N ∈ {512, 1024, 8192, 150000}`). The fused Triton kernel provides 10–100× speedup over CPU trie traversal at large vocabulary and batch sizes.
 
 ```bash
-python examples/scripts/benchmark/benchmark_vtnk.py
-# Results saved to out/heatmap_*.jpg
+python -m examples.scripts.benchmark.benchmark_vtnk
 ```
 
 ### Fused Kernel Speedup Heatmaps
@@ -296,9 +289,7 @@ Uses a FAISS `IndexFlatL2` GPU index built once from the codebook (`make_gpu_ind
 ### Benchmark setup
 
 ```bash
-python examples/scripts/benchmark/benchmark_nn_quantize.py
-# CSV results: out/bench_nn_quantize_N{N}.csv
-# Heatmaps:    out/heatmap_*.jpg
+python -m examples.scripts.benchmark.benchmark_nn_quantize
 ```
 
 Grid: `B ∈ {32, 256, 1024, 4096, 16384, 32768, 65536}`, `D ∈ {64, 128, 256}`, `N ∈ {64, 128, 256, 512}`. Heatmap axes are batch size (B, rows) vs embedding dim (D, columns). Speedup values > 1 mean the left-hand kernel is faster. All FAISS timings exclude index build time (static codebook).
