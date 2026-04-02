@@ -24,13 +24,20 @@ def _last_token_pool(last_hidden_states: torch.Tensor, attention_mask: torch.Ten
     return last_hidden_states[torch.arange(batch_size, device=last_hidden_states.device), sequence_lengths]
 
 
+def _get_detailed_qwen3_instruct(task_description: str, query: str) -> str:
+    "Instruction from Qwen 3 embedding example: https://huggingface.co/Qwen/Qwen3-Embedding-0.6B"
+    return f'Instruct: {task_description}\nQuery:{query}'
+
+
 def _encode_with_qwen3(text_feat, model_id=QWEN3_EMBEDDING_MODEL_ID, batch_size=2, max_length=8192):
+    TASK_DESCRIPTION = "Given details and metadata about a product, retrieve semantically similar products for recommendation task."
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
     model = AutoModel.from_pretrained(model_id).to(device).eval()
 
     all_embeddings = []
-    sentences = list(text_feat)
+    sentences = [_get_detailed_qwen3_instruct(TASK_DESCRIPTION, s) for s in list(text_feat)]
     for start in tqdm(range(0, len(sentences), batch_size), desc="Encoding with Qwen3"):
         batch = sentences[start : start + batch_size]
         encoded = tokenizer(
