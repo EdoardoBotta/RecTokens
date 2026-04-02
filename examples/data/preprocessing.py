@@ -1,78 +1,74 @@
 import numpy as np
+from tqdm import tqdm
 import pandas as pd
 import polars as pl
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from sentence_transformers import SentenceTransformer
+from transformers import AutoModel, AutoTokenizer
 from typing import List
 
 FUT_SUFFIX = "_fut"
 
+QWEN3_EMBEDDING_MODEL_ID = "Qwen/Qwen3-Embedding-0.6B"
+SENTENCE_T5_MODEL_ID = "sentence-transformers/sentence-t5-large"
+
+
+def _last_token_pool(last_hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    left_padding = attention_mask[:, -1].sum() == attention_mask.shape[0]
+    if left_padding:
+        return last_hidden_states[:, -1]
+    sequence_lengths = attention_mask.sum(dim=1) - 1
+    batch_size = last_hidden_states.shape[0]
+    return last_hidden_states[torch.arange(batch_size, device=last_hidden_states.device), sequence_lengths]
+
+
+def _encode_with_qwen3(text_feat, model_id=QWEN3_EMBEDDING_MODEL_ID, batch_size=2, max_length=8192):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
+    model = AutoModel.from_pretrained(model_id).to(device).eval()
+
+    all_embeddings = []
+    sentences = list(text_feat)
+    for start in tqdm(range(0, len(sentences), batch_size), desc="Encoding with Qwen3"):
+        batch = sentences[start : start + batch_size]
+        encoded = tokenizer(
+            batch, padding=True, truncation=True, max_length=max_length, return_tensors="pt"
+        ).to(device)
+        with torch.no_grad():
+            outputs = model(**encoded)
+        pooled = _last_token_pool(outputs.last_hidden_state, encoded["attention_mask"])
+        pooled = F.normalize(pooled, p=2, dim=-1)
+        all_embeddings.append(pooled.cpu())
+
+    return torch.cat(all_embeddings, dim=0)
+
+
+def _encode_with_sentence_t5(text_feat, model_id=SENTENCE_T5_MODEL_ID, batch_size=2):
+    model = SentenceTransformer(model_id)
+    return model.encode(
+        batch_size=batch_size,
+        sentences=text_feat,
+        show_progress_bar=True,
+        convert_to_tensor=True,
+    ).cpu()
+
 
 class PreprocessingMixin:
     @staticmethod
-    def _process_genres(genres, one_hot=True):
-        if one_hot:
-            return genres
+    def _encode_text_feature(text_feat, encoder: str = "qwen3", batch_size: int = 16):
+        """Encode text features into dense embeddings.
 
-        max_genres = genres.sum(axis=1).max()
-        idx_list = []
-        for i in range(genres.shape[0]):
-            idxs = np.where(genres[i, :] == 1)[0] + 1
-            missing = max_genres - len(idxs)
-            if missing > 0:
-                idxs = np.array(list(idxs) + missing * [0])
-            idx_list.append(idxs)
-        out = np.stack(idx_list)
-        return out
-
-    @staticmethod
-    def _remove_low_occurrence(source_df, target_df, index_col):
-        if isinstance(index_col, str):
-            index_col = [index_col]
-        out = target_df.copy()
-        for col in index_col:
-            count = source_df.groupby(col).agg(ratingCnt=("rating", "count"))
-            high_occ = count[count["ratingCnt"] >= 5]
-            out = out.merge(high_occ, on=col).drop(columns=["ratingCnt"])
-        return out
-
-    @staticmethod
-    def _encode_text_feature(text_feat, model=None):
-        if model is None:
-            model = SentenceTransformer("sentence-transformers/sentence-t5-large")
-        embeddings = model.encode(
-            batch_size=2,
-            sentences=text_feat,
-            show_progress_bar=True,
-            convert_to_tensor=True,
-        ).cpu()
-        return embeddings
-
-    @staticmethod
-    def _rolling_window(group, features, window_size=200, stride=1):
-        assert group["userId"].nunique() == 1, "Found data for too many users"
-
-        if len(group) < window_size:
-            window_size = len(group)
-            stride = 1
-        n_windows = (len(group) + 1 - window_size) // stride
-        feats = group[features].to_numpy().T
-        windows = np.lib.stride_tricks.as_strided(
-            feats,
-            shape=(len(features), n_windows, window_size),
-            strides=(feats.strides[0], 8 * stride, 8 * 1),
-        )
-        feat_seqs = np.split(windows, len(features), axis=0)
-        rolling_df = pd.DataFrame(
-            {
-                name: pd.Series(np.split(feat_seqs[i].squeeze(0), n_windows, 0)).map(
-                    torch.tensor
-                )
-                for i, name in enumerate(features)
-            }
-        )
-        return rolling_df
+        Args:
+            text_feat: Iterable of strings to encode.
+            encoder: ``"qwen3"`` (default) uses Qwen/Qwen3-0.6B with mean pooling;
+                     ``"sentence-t5"`` uses sentence-transformers/sentence-t5-large.
+            batch_size: Batch size for encoding (only used by the qwen3 encoder).
+        """
+        if encoder == "sentence-t5":
+            return _encode_with_sentence_t5(text_feat)
+        return _encode_with_qwen3(text_feat, batch_size=batch_size)
 
     @staticmethod
     def _ordered_train_test_split(df, on, train_split=0.8):
@@ -97,81 +93,4 @@ class PreprocessingMixin:
         }
         out.update(fut_out)
         out["userId"] = torch.from_numpy(df.select("userId").to_numpy())
-        return out
-
-    @staticmethod
-    def _generate_user_history(
-        ratings_df,
-        features: List[str] = ["movieId", "rating"],
-        window_size: int = 200,
-        stride: int = 1,
-        train_split: float = 0.8,
-    ) -> torch.Tensor:
-
-        if isinstance(ratings_df, pd.DataFrame):
-            ratings_df = pl.from_pandas(ratings_df)
-
-        grouped_by_user = (
-            ratings_df.sort("userId", "timestamp")
-            .group_by_dynamic(
-                index_column=pl.int_range(pl.len()),
-                every=f"{stride}i",
-                period=f"{window_size}i",
-                by="userId",
-            )
-            .agg(
-                *(pl.col(feat) for feat in features),
-                seq_len=pl.col(features[0]).len(),
-                max_timestamp=pl.max("timestamp"),
-            )
-        )
-
-        max_seq_len = grouped_by_user.select(pl.col("seq_len").max()).item()
-        split_grouped_by_user = PreprocessingMixin._ordered_train_test_split(
-            grouped_by_user, "max_timestamp", 0.8
-        )
-        padded_history = (
-            split_grouped_by_user.with_columns(pad_len=max_seq_len - pl.col("seq_len"))
-            .filter(pl.col("is_train").or_(pl.col("seq_len") > 1))
-            .select(
-                pl.col("userId"),
-                pl.col("max_timestamp"),
-                pl.col("is_train"),
-                *(
-                    pl.when(pl.col("is_train"))
-                    .then(
-                        pl.col(feat)
-                        .list.concat(
-                            pl.lit(-1, dtype=pl.Int64).repeat_by(pl.col("pad_len"))
-                        )
-                        .list.to_array(max_seq_len)
-                    )
-                    .otherwise(
-                        pl.col(feat)
-                        .list.slice(0, pl.col("seq_len") - 1)
-                        .list.concat(
-                            pl.lit(-1, dtype=pl.Int64).repeat_by(pl.col("pad_len") + 1)
-                        )
-                        .list.to_array(max_seq_len)
-                    )
-                    for feat in features
-                ),
-                *(
-                    pl.when(pl.col("is_train"))
-                    .then(pl.lit(-1, dtype=pl.Int64))
-                    .otherwise(pl.col(feat).list.get(-1))
-                    .alias(feat + FUT_SUFFIX)
-                    for feat in features
-                ),
-            )
-        )
-
-        out = {}
-        out["train"] = PreprocessingMixin._df_to_tensor_dict(
-            padded_history.filter(pl.col("is_train")), features
-        )
-        out["eval"] = PreprocessingMixin._df_to_tensor_dict(
-            padded_history.filter(pl.col("is_train").not_()), features
-        )
-
         return out

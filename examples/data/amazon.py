@@ -137,7 +137,7 @@ class AmazonReviews(InMemoryDataset, PreprocessingMixin):
             )
             .merge(asin2id, on="asin")
             .sort_values(by="id")
-            .fillna({"brand": "Unknown"})
+            .fillna({"brand": "Unknown", "description": ""})
         )
 
         sentences = item_data.apply(
@@ -153,6 +153,9 @@ class AmazonReviews(InMemoryDataset, PreprocessingMixin):
                 + "; "
                 + "Price: "
                 + str(row["price"])
+                + "; "
+                + "Description: "
+                + str(row["description"])
                 + "; "
             ),
             axis=1,
@@ -271,7 +274,7 @@ class ItemData(Dataset):
         item_ids = (
             torch.tensor(idx).unsqueeze(0) if not isinstance(idx, torch.Tensor) else idx
         )
-        x = self.item_data[idx, :768]
+        x = self.item_data[idx]
         return SeqBatch(
             user_ids=-1 * torch.ones_like(item_ids.squeeze(0)),
             ids=item_ids,

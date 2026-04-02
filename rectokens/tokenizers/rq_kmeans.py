@@ -51,6 +51,7 @@ class RQKMeansTokenizer(Tokenizer):
     # Tokenizer interface
     # ------------------------------------------------------------------
 
+    @torch.compile(mode="reduce-overhead")
     def fit_step(self, batch: torch.Tensor) -> RQKMeansTokenizer:
         """Update all K-means codebooks with a single batch.
 
@@ -64,6 +65,7 @@ class RQKMeansTokenizer(Tokenizer):
         self._fitted = True
         return self
 
+    @torch.compile(mode="reduce-overhead")
     def encode(self, features: torch.Tensor) -> TokenSequence:
         """Encode item features to RQ token sequences.
 
@@ -86,6 +88,7 @@ class RQKMeansTokenizer(Tokenizer):
         codes = out.codes  # (B, num_levels)
         return TokenSequence(codes=codes.squeeze(0) if single else codes)
 
+    @torch.compile(mode="reduce-overhead")
     def decode(self, tokens: TokenSequence) -> torch.Tensor:
         """Reconstruct item features by summing codebook entries.
 

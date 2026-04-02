@@ -10,8 +10,10 @@ import os
 
 import gin
 import torch
+import wandb
 from torch.optim import AdamW
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
+from tqdm import tqdm
 
 from examples.data.amazon import ItemData
 from examples.utils import parse_config
@@ -45,17 +47,22 @@ def train(
     eval_every_n: int = 0,
     output_dir: str = "checkpoints/rqvae",
     learnable_codebook: bool = False,
+    wandb_project: str | None = "rqvae-training",
 ) -> RQVAETokenizer:
+    if wandb_project is not None:
+        params = locals()
+
     device = get_device()
-    print(f"Training on: {device}")
+
+    if wandb_project is not None:
+        wandb.login()
+        run = wandb.init(project=wandb_project, config=params)
 
     dataset = ItemData(root=root, split=split, train_test_split=train_test_split)
-    print(f"Dataset: {len(dataset)} items, dim={dataset[0].x.shape[0]}")
 
     eval_loader = None
     if eval_every_n > 0:
         eval_dataset = ItemData(root=root, split=split, train_test_split="eval")
-        print(f"Eval dataset: {len(eval_dataset)} items")
         eval_sampler = BatchSampler(SequentialSampler(eval_dataset), batch_size, False)
         eval_loader = DataLoader(
             eval_dataset,
@@ -86,7 +93,8 @@ def train(
     os.makedirs(output_dir, exist_ok=True)
 
     model.train()
-    for epoch in range(1, num_epochs + 1):
+    pbar = tqdm(range(1, num_epochs + 1), desc="train")
+    for epoch in pbar:
         total_recon = 0.0
         total_commit = 0.0
         total_unique = 0.0
@@ -96,6 +104,7 @@ def train(
             optimizer.zero_grad()
 
             out = model(x)
+
             r_loss = recon_loss(out.recon, x)
             commit_loss = out.commitment_loss
             (r_loss + commit_loss).backward()
@@ -107,13 +116,24 @@ def train(
 
         if epoch % log_every == 0:
             n = len(loader)
-            print(
-                f"epoch {epoch:3d}/{num_epochs}"
-                f"  recon={total_recon / n:.4f}"
-                f"  commit={total_commit / n:.4f}"
-                f"  total={(total_recon + total_commit) / n:.4f}"
-                f"  p_unique={total_unique / n:.3f}"
+            avg_recon = total_recon / n
+            avg_commit = total_commit / n
+            avg_p_unique = total_unique / n
+            pbar.set_postfix(
+                recon=f"{avg_recon:.4f}",
+                commit=f"{avg_commit:.4f}",
+                p_unique=f"{avg_p_unique:.3f}",
             )
+            if wandb_project is not None:
+                wandb.log(
+                    {
+                        "train/recon": avg_recon,
+                        "train/commit": avg_commit,
+                        "train/total": avg_recon + avg_commit,
+                        "train/p_unique": avg_p_unique,
+                    },
+                    step=epoch,
+                )
 
         if eval_every_n > 0 and epoch % eval_every_n == 0:
             model.eval()
@@ -125,37 +145,34 @@ def train(
 
             stats = run_eval(eval_loader, _step, num_levels, codebook_size)
             model.train()
-            entropy_str = "  ".join(
-                f"H{lvl}={e:.4f}" for lvl, e in enumerate(stats["entropies"])
-            )
             avg_recon, avg_commit = stats["avg_recon"], stats["avg_commit"]
-            print(
-                f"[eval] epoch {epoch:3d}/{num_epochs}"
-                f"  recon={avg_recon:.4f}"
-                f"  commit={avg_commit:.4f}"
-                f"  total={avg_recon + avg_commit:.4f}"
-                f"  p_unique={stats['p_unique']:.3f}"
-                f"  {entropy_str}"
+            pbar.set_postfix(
+                eval_recon=f"{avg_recon:.4f}",
+                eval_commit=f"{avg_commit:.4f}",
+                eval_p_unique=f"{stats['p_unique']:.3f}",
             )
+            if wandb_project is not None:
+                eval_log = {
+                    "eval/recon": avg_recon,
+                    "eval/commit": avg_commit,
+                    "eval/total": avg_recon + avg_commit,
+                    "eval/p_unique": stats["p_unique"],
+                }
+                for lvl, e in enumerate(stats["entropies"]):
+                    eval_log[f"eval/entropy_lvl{lvl}"] = e
+                wandb.log(eval_log, step=epoch)
 
         if save_every > 0 and epoch % save_every == 0:
             ckpt = os.path.join(output_dir, f"epoch_{epoch}.pt")
             model._fitted = True
             model.save(ckpt)
-            print(f"Saved checkpoint → {ckpt}")
 
     model._fitted = True
     final_path = os.path.join(output_dir, "final.pt")
     model.save(final_path)
-    print(f"Saved final model → {final_path}")
 
-    # Sanity check
-    model.eval()
-    tokens = model.encode(dataset.item_data[:4].float().to(device))
-    recon = model.decode(tokens)
-    print(f"\nEncoded shape : {tokens.codes.shape}")
-    print(f"Decoded shape : {recon.shape}")
-    print(f"Token tuples  : {tokens.to_tuple_ids()}")
+    if wandb_project is not None:
+        wandb.finish()
 
     return model
 

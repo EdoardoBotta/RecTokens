@@ -10,7 +10,9 @@ import os
 
 import gin
 import torch
+import wandb
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
+from tqdm import tqdm
 
 from examples.data.amazon import ItemData
 from examples.utils import parse_config
@@ -31,14 +33,20 @@ def train(
     save_every: int = 5,
     eval_every_n: int = 0,
     output_dir: str = "checkpoints/rqkmeans",
+    wandb_project: str | None = "rqkmeans-training",
 ) -> RQKMeansTokenizer:
+    if wandb_project is not None:
+        params = locals()
+
     dataset = ItemData(root=root, split=split, train_test_split=train_test_split)
-    print(f"Dataset: {len(dataset)} items, dim={dataset[0].x.shape[0]}")
+
+    if wandb_project is not None:
+        wandb.login()
+        run = wandb.init(project=wandb_project, config=params)
 
     eval_loader = None
     if eval_every_n > 0:
         eval_dataset = ItemData(root=root, split=split, train_test_split="eval")
-        print(f"Eval dataset: {len(eval_dataset)} items")
         eval_sampler = BatchSampler(SequentialSampler(eval_dataset), batch_size, False)
         eval_loader = DataLoader(
             eval_dataset,
@@ -61,7 +69,8 @@ def train(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    for epoch in range(1, num_epochs + 1):
+    pbar = tqdm(range(1, num_epochs + 1), desc="train")
+    for epoch in pbar:
         total_recon = 0.0
         total_unique = 0.0
 
@@ -84,11 +93,14 @@ def train(
 
         if epoch % log_every == 0:
             n = len(loader)
-            print(
-                f"epoch {epoch:3d}/{num_epochs}"
-                f"  recon={total_recon / n:.4f}"
-                f"  p_unique={total_unique / n:.3f}"
-            )
+            avg_recon = total_recon / n
+            avg_p_unique = total_unique / n
+            pbar.set_postfix(recon=f"{avg_recon:.4f}", p_unique=f"{avg_p_unique:.3f}")
+            if wandb_project is not None:
+                wandb.log(
+                    {"train/recon": avg_recon, "train/p_unique": avg_p_unique},
+                    step=epoch,
+                )
 
         if eval_every_n > 0 and epoch % eval_every_n == 0:
 
@@ -98,33 +110,29 @@ def train(
                 return recon_loss(recon, x), None, tokens.codes
 
             stats = run_eval(eval_loader, _step, num_levels, codebook_size)
-            entropy_str = "  ".join(
-                f"H{lvl}={e:.4f}" for lvl, e in enumerate(stats["entropies"])
-            )
             avg_recon = stats["avg_recon"]
-            print(
-                f"[eval] epoch {epoch:3d}/{num_epochs}"
-                f"  recon={avg_recon:.4f}"
-                f"  total={avg_recon:.4f}"
-                f"  p_unique={stats['p_unique']:.3f}"
-                f"  {entropy_str}"
+            pbar.set_postfix(
+                eval_recon=f"{avg_recon:.4f}",
+                eval_p_unique=f"{stats['p_unique']:.3f}",
             )
+            if wandb_project is not None:
+                eval_log = {
+                    "eval/recon": avg_recon,
+                    "eval/p_unique": stats["p_unique"],
+                }
+                for lvl, e in enumerate(stats["entropies"]):
+                    eval_log[f"eval/entropy_lvl{lvl}"] = e
+                wandb.log(eval_log, step=epoch)
 
         if save_every > 0 and epoch % save_every == 0:
             ckpt = os.path.join(output_dir, f"epoch_{epoch}.pt")
             model.save(ckpt)
-            print(f"Saved checkpoint → {ckpt}")
 
     final_path = os.path.join(output_dir, "final.pt")
     model.save(final_path)
-    print(f"Saved final model → {final_path}")
 
-    # Sanity check
-    tokens = model.encode(dataset.item_data[:4].float())
-    recon = model.decode(tokens)
-    print(f"\nEncoded shape : {tokens.codes.shape}")
-    print(f"Decoded shape : {recon.shape}")
-    print(f"Token tuples  : {tokens.to_tuple_ids()}")
+    if wandb_project is not None:
+        wandb.finish()
 
     return model
 

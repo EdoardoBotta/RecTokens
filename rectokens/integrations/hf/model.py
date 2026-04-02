@@ -16,7 +16,6 @@ from rectokens.schemas.config import GenerationConfig
 def _resize_and_initialize(
     hf_model: nn.Module,
     item_tokenizer: ItemAwareTokenizer,
-    projection: Optional[nn.Module] = None,
 ) -> None:
     """Resize ``hf_model`` embeddings and lm_head to match the extended vocabulary.
 
@@ -25,13 +24,12 @@ def _resize_and_initialize(
     ``resize_token_embeddings`` handles both ``embed_tokens`` and ``lm_head``
     (including the tied-weight case).
 
+    New item embeddings are initialized by HF's mean/covariance strategy.
+
     Args:
         hf_model: A ``PreTrainedModel`` (or language-model sub-component) whose
             embeddings will be resized.
         item_tokenizer: The ``ItemAwareTokenizer`` after token registration.
-        projection: Optional ``nn.Module`` mapping latent codebook vectors
-            ``(K, latent_dim)`` → ``(K, hidden_size)``.  When ``None`` (default),
-            new item embeddings are initialized by HF's mean/covariance strategy.
 
     Note:
         ``ConstraintEnforcer`` requires the lm_head to be bias-free.  Most HF
@@ -74,25 +72,6 @@ def _resize_and_initialize(
         f"(+{n_new} item tokens, ids {first_item}–{last_item})  "
         f"lm_head tied={tied}"
     )
-
-    if projection is not None:
-        if item_tokenizer.item_tokenizer is None:
-            raise RuntimeError(
-                "_resize_and_initialize: projection-based embedding initialization "
-                "requires codebook access via item_tokenizer.item_tokenizer.rq, "
-                "but item_tokenizer.item_tokenizer is None. "
-                "Provide a real item tokenizer when using projection=."
-            )
-        emb = hf_model.get_input_embeddings()
-        for l in range(item_tokenizer.num_levels):
-            codebook = item_tokenizer.item_tokenizer.rq.levels[l].codebook
-            all_codes = torch.arange(item_tokenizer.codebook_size)
-            vecs = codebook.lookup(all_codes)  # (K, latent_dim)
-            projected = projection(vecs)  # (K, hidden_size)
-            start = item_tokenizer.item_token_id(l, 0)
-            emb.weight.data[start : start + item_tokenizer.codebook_size] = (
-                projected.detach()
-            )
 
 
 class ItemAwareCausalLM(PreTrainedModel):
@@ -211,7 +190,6 @@ class ItemAwareCausalLM(PreTrainedModel):
         cls,
         model_name_or_path: "str | nn.Module",
         item_tokenizer: ItemAwareTokenizer,
-        projection: Optional[nn.Module] = None,
         **kwargs,
     ) -> "ItemAwareCausalLM":
         """Factory: build an ``ItemAwareCausalLM`` from a name/path or pre-loaded model.
@@ -228,8 +206,6 @@ class ItemAwareCausalLM(PreTrainedModel):
             item_tokenizer: Fully initialised ``ItemAwareTokenizer`` (item tokens
                 already registered).  Its ``num_levels`` and ``codebook_size``
                 attributes are used to build the ``ItemAwareCausalLMConfig``.
-            projection: Optional ``nn.Module`` mapping latent codebook vectors to the
-                model's hidden size.  Forwarded verbatim to ``_resize_and_initialize``.
             **kwargs: Passed to ``AutoModelForCausalLM.from_pretrained`` when
                 ``model_name_or_path`` is a string.  Silently ignored otherwise.
 
@@ -254,7 +230,7 @@ class ItemAwareCausalLM(PreTrainedModel):
         else:
             hf_model = model_name_or_path
 
-        _resize_and_initialize(hf_model, item_tokenizer, projection=projection)
+        _resize_and_initialize(hf_model, item_tokenizer)
 
         config = ItemAwareCausalLMConfig(
             num_levels=item_tokenizer.num_levels,

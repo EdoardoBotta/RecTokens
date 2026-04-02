@@ -10,8 +10,7 @@ Verifies that:
 - decode_sequence recovers text spans and item codes (round-trip).
 - InterleavedSequenceCollator produces correct shapes, attention masks, labels,
   and loss masks for loss_on in {"all", "items", "text"}.
-- ItemAwareCausalLM.from_causal_lm correctly expands embed_tokens/lm_head and,
-  when a projection is supplied, fills item embeddings from the codebook.
+- ItemAwareCausalLM.from_causal_lm correctly expands embed_tokens/lm_head.
 """
 
 from __future__ import annotations
@@ -600,54 +599,6 @@ class TestResizeAndInitialize(unittest.TestCase):
         item_model = ItemAwareCausalLM.from_causal_lm(model, self.aware)
         new_weight = item_model.get_input_embeddings().weight.data
         assert torch.allclose(new_weight[: self.orig], orig_weight)
-
-    def test_projection_initializes_item_embeddings(self) -> None:
-        """With a projection, item embeddings must equal projection(codebook_vec)."""
-        LATENT_DIM = 8
-        rqvae_tok = RQVAETokenizer(
-            input_dim=DIM,
-            latent_dim=LATENT_DIM,
-            hidden_dim=32,
-            num_levels=NUM_LEVELS,
-            codebook_size=CODEBOOK_SIZE,
-        )
-        rqvae_tok._fitted = True
-
-        hf_tok = _make_char_fast_tok()
-        aware = ItemAwareTokenizer(
-            hf_tok, rqvae_tok, num_levels=NUM_LEVELS, codebook_size=CODEBOOK_SIZE
-        )
-        orig = aware.original_vocab_size
-
-        projection = nn.Linear(LATENT_DIM, HIDDEN_SIZE, bias=False)
-        model = _MockHFModel(orig, HIDDEN_SIZE)
-        item_model = ItemAwareCausalLM.from_causal_lm(
-            model, aware, projection=projection
-        )
-
-        emb = item_model.get_input_embeddings()
-        for l in range(NUM_LEVELS):
-            codebook = rqvae_tok.rq.levels[l].codebook
-            for c in range(CODEBOOK_SIZE):
-                vec = codebook.lookup(torch.tensor([c]))[0]  # (LATENT_DIM,)
-                expected = projection(vec).detach()
-                actual = emb.weight[aware.item_token_id(l, c)].detach()
-                assert torch.allclose(expected, actual, atol=1e-6), (
-                    f"Embedding mismatch at level={l} code={c}"
-                )
-
-    def test_projection_without_item_tokenizer_raises(self) -> None:
-        """projection= requires a real item tokenizer; None must raise RuntimeError."""
-        from rectokens.integrations.hf.model import _resize_and_initialize
-
-        aware = ItemAwareTokenizer(
-            _make_char_fast_tok(), num_levels=NUM_LEVELS, codebook_size=CODEBOOK_SIZE
-        )
-        model = _MockHFModel(aware.original_vocab_size, HIDDEN_SIZE)
-        with self.assertRaises(RuntimeError):
-            _resize_and_initialize(
-                model, aware, projection=nn.Linear(8, HIDDEN_SIZE, bias=False)
-            )
 
 
 # ---------------------------------------------------------------------------

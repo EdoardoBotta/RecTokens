@@ -125,7 +125,7 @@ class VQQuantizer(Quantizer, nn.Module):
         """
         # On the first training batch, seed the codebook from actual encoder outputs
         # so that every entry starts inside the data manifold.
-        if self.training and not self._initialized.item():
+        if self.training and not self._initialized:
             self._init_from_batch(x.detach())
 
         result = self._codebook.find_nearest(x)
@@ -177,7 +177,7 @@ class VQQuantizer(Quantizer, nn.Module):
         actual_k = min(k, n)
 
         # Seed first centroid uniformly at random
-        first = int(torch.randint(n, (1,), device=x.device).item())
+        first = torch.randint(n, (1,), device=x.device)[0]
         centroids = [x[first]]
 
         for _ in range(actual_k - 1):
@@ -185,9 +185,9 @@ class VQQuantizer(Quantizer, nn.Module):
             dists = torch.cdist(x, stacked).min(dim=1).values ** 2  # (N,)
             total = dists.sum()
             if total == 0:
-                idx = int(torch.randint(n, (1,), device=x.device).item())
+                idx = torch.randint(n, (1,), device=x.device)[0]
             else:
-                idx = int(torch.multinomial(dists / total, 1).item())
+                idx = torch.multinomial(dists / total, 1)[0]
             centroids.append(x[idx])
 
         init = torch.stack(centroids)  # (actual_k, D)
@@ -226,21 +226,33 @@ class VQQuantizer(Quantizer, nn.Module):
         cluster_size = one_hot.sum(dim=0)  # (K,)
         embed_sum = one_hot.t() @ x  # (K, D)
 
-        active = cluster_size > 0
-        if active.any():
-            # EMA update restricted to active codes only
-            self._ema_cluster_size[active] = (
-                self.ema_decay * self._ema_cluster_size[active]
-                + (1 - self.ema_decay) * cluster_size[active]
-            )
-            self._ema_embed_sum[active] = (
-                self.ema_decay * self._ema_embed_sum[active]
-                + (1 - self.ema_decay) * embed_sum[active]
-            )
+        active = cluster_size > 0  # (K,) bool
 
-            n = self._ema_cluster_size[active].clamp(min=1e-5)
-            new_embeddings = self._ema_embed_sum[active] / n.unsqueeze(1)
-            self._codebook.update(torch.where(active)[0], new_embeddings)
+        # EMA update restricted to active codes — torch.where avoids
+        # data-dependent boolean indexing that would break torch.compile.
+        new_ema_cluster_size = (
+            self.ema_decay * self._ema_cluster_size
+            + (1 - self.ema_decay) * cluster_size
+        )
+        self._ema_cluster_size.copy_(
+            torch.where(active, new_ema_cluster_size, self._ema_cluster_size)
+        )
+
+        new_ema_embed_sum = (
+            self.ema_decay * self._ema_embed_sum + (1 - self.ema_decay) * embed_sum
+        )
+        self._ema_embed_sum.copy_(
+            torch.where(active.unsqueeze(1), new_ema_embed_sum, self._ema_embed_sum)
+        )
+
+        n = self._ema_cluster_size.clamp(min=1e-5)  # (K,)
+        new_embeddings = self._ema_embed_sum / n.unsqueeze(1)  # (K, D)
+        with torch.no_grad():
+            self._codebook.embeddings.copy_(
+                torch.where(
+                    active.unsqueeze(1), new_embeddings, self._codebook.embeddings
+                )
+            )
 
         # Dead-code restart: track consecutive steps without assignment and
         # replace stranded codes with random batch samples.
@@ -251,17 +263,38 @@ class VQQuantizer(Quantizer, nn.Module):
         #   2. Codes that WERE active but became stranded as the encoder drifted
         #      (ema_cluster_size stays > 0 forever under the active-only update,
         #      so a pure ema==0 check would never restart them).
-        self._steps_since_active[active] = 0
-        self._steps_since_active[~active] += 1
+        new_steps = torch.where(
+            active,
+            torch.zeros_like(self._steps_since_active),
+            self._steps_since_active + 1,
+        )
+        dead = new_steps >= self.restart_after_steps  # (K,) bool
 
-        dead = self._steps_since_active >= self.restart_after_steps
-        n_dead = int(dead.sum().item())
-        if n_dead > 0:
-            rand_idx = torch.randint(len(x), (n_dead,), device=x.device)
-            self._codebook.update(torch.where(dead)[0], x[rand_idx])
-            self._ema_cluster_size[dead] = 0.0
-            self._ema_embed_sum[dead] = 0.0
-            self._steps_since_active[dead] = 0
+        # Always draw k replacements (one per code) and apply only for dead
+        # codes via torch.where — avoids data-dependent shape from n_dead.
+        rand_idx = torch.randint(len(x), (k,), device=x.device)
+        replacement = x[rand_idx]  # (K, D)
+        dead_expanded = dead.unsqueeze(1)  # (K, 1)
+
+        with torch.no_grad():
+            self._codebook.embeddings.copy_(
+                torch.where(dead_expanded, replacement, self._codebook.embeddings)
+            )
+        self._ema_cluster_size.copy_(
+            torch.where(
+                dead, torch.zeros_like(self._ema_cluster_size), self._ema_cluster_size
+            )
+        )
+        self._ema_embed_sum.copy_(
+            torch.where(
+                dead_expanded,
+                torch.zeros_like(self._ema_embed_sum),
+                self._ema_embed_sum,
+            )
+        )
+        self._steps_since_active.copy_(
+            torch.where(dead, torch.zeros_like(new_steps), new_steps)
+        )
 
     # Expose as nn.Module forward as well
     def forward(self, x: torch.Tensor) -> QuantizerOutput:
@@ -392,6 +425,7 @@ class RQVAETokenizer(nn.Module, Tokenizer):
     # nn.Module forward (used during training)
     # ------------------------------------------------------------------
 
+    @torch.compile(mode="reduce-overhead")
     def forward(self, x: torch.Tensor) -> RQVAEOutput:
         """Full encode → quantize → decode forward pass.
 

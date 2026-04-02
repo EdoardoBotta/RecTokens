@@ -139,9 +139,7 @@ class KMeansQuantizer(Quantizer):
     ) -> torch.Tensor:
         """K-means++ centroid seeding on ``data``."""
         n = len(data)
-        first_idx = int(
-            torch.randint(n, (1,), generator=generator, device=data.device).item()
-        )
+        first_idx = torch.randint(n, (1,), generator=generator, device=data.device)[0]
         centroids = [data[first_idx]]
 
         for _ in range(k - 1):
@@ -150,15 +148,9 @@ class KMeansQuantizer(Quantizer):
             total = dists.sum()
             if total == 0:
                 # All points coincide with existing centroids; pick uniformly
-                idx = int(
-                    torch.randint(
-                        n, (1,), generator=generator, device=data.device
-                    ).item()
-                )
+                idx = torch.randint(n, (1,), generator=generator, device=data.device)[0]
             else:
-                idx = int(
-                    torch.multinomial(dists / total, 1, generator=generator).item()
-                )
+                idx = torch.multinomial(dists / total, 1, generator=generator)[0]
             centroids.append(data[idx])
 
         return torch.stack(centroids)

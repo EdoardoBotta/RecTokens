@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 
 def recon_loss(recon: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """Per-sample sum of squared errors, averaged over the batch."""
-    return F.mse_loss(recon, x, reduction="none").sum(dim=-1).mean()
+    return F.mse_loss(recon, x)
 
 
 def run_eval(
