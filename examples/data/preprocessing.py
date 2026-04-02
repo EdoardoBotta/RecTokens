@@ -30,7 +30,11 @@ def _get_detailed_qwen3_instruct(task_description: str, query: str) -> str:
 
 
 def _encode_with_qwen3(text_feat, model_id=QWEN3_EMBEDDING_MODEL_ID, batch_size=2, max_length=8192):
-    TASK_DESCRIPTION = "Given details and metadata about a product, retrieve semantically similar products for recommendation task."
+    TASK_DESCRIPTION = (
+        "Given product metadata including title, brand, category, and description, "
+        "retrieve products that share similar features, use case, and category and would "
+        "be recommended together."
+    )
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
