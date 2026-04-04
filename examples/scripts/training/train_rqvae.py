@@ -1,7 +1,7 @@
 """Train an RQVAETokenizer on Amazon item embeddings.
 
 Usage:
-    python examples/scripts/training/train_rqvae.py examples/configs/train_rqvae_beauty.gin
+    python examples/scripts/training/train_rqvae.py examples/configs/pretraining/train_rqvae_beauty.gin
 """
 
 from __future__ import annotations

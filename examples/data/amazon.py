@@ -215,11 +215,12 @@ class UserSequenceDataset(Dataset):
 
 
 class PrecomputedSequenceDataset(Dataset):
-    """Dataset that loads precomputed interleaved token-ID sequences from disk.
+    """Dataset that loads precomputed chat-formatted training samples from disk.
 
-    Each item is a 1D ``torch.long`` tensor of token IDs produced by
-    ``scripts/preprocessing/precompute_sequences.py``.  Loading these avoids
-    any neural-network inference during training.
+    Each item is a dict ``{"input_ids": tensor, "labels": tensor}`` produced by
+    ``scripts/preprocessing/precompute_sequences.py``.  Labels are already
+    masked to ``-100`` on the user turn; loss is computed only on the assistant
+    turn.  Loading these avoids any neural-network inference during training.
 
     Args:
         path: Path to a ``.pt`` file saved by the preprocessing script.
@@ -227,16 +228,16 @@ class PrecomputedSequenceDataset(Dataset):
 
     def __init__(self, path: str) -> None:
         data = torch.load(path, weights_only=False)
-        self.sequences: list[torch.Tensor] = data["sequences"]
+        self.samples: list[dict] = data["samples"]
         self.original_vocab_size: int = data["original_vocab_size"]
         self.num_levels: int = data["num_levels"]
         self.codebook_size: int = data["codebook_size"]
 
     def __len__(self) -> int:
-        return len(self.sequences)
+        return len(self.samples)
 
-    def __getitem__(self, idx: int) -> torch.Tensor:
-        return self.sequences[idx]  # 1D long tensor
+    def __getitem__(self, idx: int) -> dict:
+        return self.samples[idx]  # {"input_ids": tensor, "labels": tensor}
 
 
 class ItemData(Dataset):

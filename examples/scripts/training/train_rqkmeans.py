@@ -1,7 +1,7 @@
 """Train an RQKMeansTokenizer on Amazon item embeddings.
 
 Usage:
-    python examples/scripts/training/train_rqkmeans.py examples/configs/train_rqkmeans_beauty.gin
+    python examples/scripts/training/train_rqkmeans.py examples/configs/pretraining/train_rqkmeans_beauty.gin
 """
 
 from __future__ import annotations

@@ -10,7 +10,6 @@ train.lr = 2e-4
 train.weight_decay = 1e-2
 train.max_length = 512
 train.no_expand_vocab = False
-train.loss_on = "all"
 train.output_dir = "checkpoints/qwen/beauty"
 train.log_every = 10
 train.save_every = 5000

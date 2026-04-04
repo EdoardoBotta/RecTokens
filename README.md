@@ -53,12 +53,12 @@ Choose **RQKMeans** (fast, no GPU required) or **RQVAE** (better reconstruction,
 
 **RQKMeans:**
 ```bash
-python -m examples.scripts.training.train_rqkmeans examples/configs/train_rqkmeans_beauty.gin
+python -m examples.scripts.training.train_rqkmeans examples/configs/pretraining/train_rqkmeans_beauty.gin
 ```
 
 **RQVAE:**
 ```bash
-python -m examples.scripts.training.train_rqvae examples/configs/train_rqvae_beauty.gin
+python -m examples.scripts.training.train_rqvae examples/configs/pretraining/train_rqvae_beauty.gin
 ```
 
 ### Step 2 — Precompute interleaved sequences
@@ -66,10 +66,10 @@ python -m examples.scripts.training.train_rqvae examples/configs/train_rqvae_bea
 Encode all item embeddings once with the fitted tokenizer and assemble the flat token-ID sequences for every user (text tokens + semantic ID tokens). This avoids repeated neural-network inference during training.
 
 ```bash
-python -m examples.scripts.preprocessing.precompute_sequences examples/configs/precompute_sequences_beauty.gin
+python -m examples.scripts.preprocessing.precompute_sequences examples/configs/preprocessing/precompute_sequences_beauty.gin
 ```
 
-Key config parameters (`examples/configs/precompute_sequences_beauty.gin`):
+Key config parameters (`examples/configs/preprocessing/precompute_sequences_beauty.gin`):
 - `main.item_tok_type` — `"rqvae"` (default) or `"rqkmeans"`
 - `main.seq_splits` — tuple of splits: `("train", "eval", "test")`
 - `main.include_future` — append the held-out future item to each sequence
@@ -78,10 +78,10 @@ Key config parameters (`examples/configs/precompute_sequences_beauty.gin`):
 ### Step 3 — Finetune Qwen on precomputed sequences
 
 ```bash
-python -m examples.scripts.training.finetune_qwen examples/configs/finetune_qwen_beauty.gin
+python -m examples.scripts.training.finetune_qwen examples/configs/finetuning/finetune_qwen_beauty.gin
 ```
 
-Key config parameters (`examples/configs/finetune_qwen_beauty.gin`):
+Key config parameters (`examples/configs/finetuning/finetune_qwen_beauty.gin`):
 - `train.loss_on` — `"all"` (default), `"items"`, or `"text"`
 - `train.bf16` / `train.gradient_checkpointing` — recommended for GPU training
 - `train.wandb_project` / `train.wandb_run_name` — optional W&B logging (`None` for no logging)
@@ -383,7 +383,7 @@ aware_tokenizer = ItemAwareTokenizer(
     num_levels=3,
     codebook_size=256,
 )
-# vocab now includes 3×256 + 1 = 769 new tokens: <item_L0_C0> … <item_L2_C255> + <item_start>
+# vocab now includes 3×256 + 2 = 770 new tokens: <item_L0_C0> … <item_L2_C255> + <|item_start|> + <|item_end|>
 
 # 3. Load model and resize embeddings to the extended vocab
 # Optionally pass projection= to initialize item embeddings from RQ codebook vectors
@@ -492,7 +492,7 @@ generated = autoregressive_generate(
 | `examples/scripts/benchmark/benchmark_vtnk.py` | Benchmark constrained decoding implementations |
 | `examples/scripts/benchmark/benchmark_nn_quantize.py` | Benchmark nearest-neighbor quantization kernels |
 
-All scripts accept a single positional gin config file. Ready-made configs live in `examples/configs/`.
+All scripts accept a single positional gin config file. Ready-made configs live in `examples/configs/` organized into `pretraining/`, `finetuning/`, and `preprocessing/` subdirectories.
 
 ## Module Structure
 
@@ -513,13 +513,16 @@ rectokens/
 
 examples/
 ├── configs/
-│   ├── train_rqvae_beauty.gin        # RQ-VAE tokenizer — Amazon Beauty
-│   ├── train_rqvae_sports.gin        # RQ-VAE tokenizer — Amazon Sports
-│   ├── train_rqkmeans_beauty.gin     # RQ-KMeans tokenizer — Amazon Beauty
-│   ├── train_rqkmeans_sports.gin     # RQ-KMeans tokenizer — Amazon Sports
-│   ├── precompute_sequences_beauty.gin
-│   ├── finetune_qwen_beauty.gin
-│   └── eval_retrieval_beauty.gin
+│   ├── pretraining/
+│   │   ├── train_rqvae_beauty.gin        # RQ-VAE tokenizer — Amazon Beauty
+│   │   ├── train_rqvae_sports.gin        # RQ-VAE tokenizer — Amazon Sports
+│   │   ├── train_rqkmeans_beauty.gin     # RQ-KMeans tokenizer — Amazon Beauty
+│   │   └── train_rqkmeans_sports.gin     # RQ-KMeans tokenizer — Amazon Sports
+│   ├── finetuning/
+│   │   ├── finetune_qwen_beauty.gin
+│   │   └── eval_retrieval_beauty.gin
+│   └── preprocessing/
+│       └── precompute_sequences_beauty.gin
 ├── data/
 │   └── amazon.py       # AmazonReviews, ItemData, UserSequenceDataset,
 │                       # PrecomputedSequenceDataset

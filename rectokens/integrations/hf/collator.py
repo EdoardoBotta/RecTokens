@@ -104,89 +104,59 @@ class InterleavedSequenceCollator:
 
 
 class PrecomputedSequenceCollator:
-    """Collates pre-encoded token-ID sequences into padded batches for HF training.
+    """Collates pre-encoded chat samples into padded batches for HF training.
 
-    Each example is a 1D ``torch.long`` tensor produced by
-    ``scripts/preprocessing/precompute_sequences.py``.  No neural-network
-    inference is performed — the collator only truncates, pads, and applies
-    loss masking.
+    Each example is a dict ``{"input_ids": tensor, "labels": tensor}`` produced
+    by ``scripts/preprocessing/precompute_sequences.py``.  Labels are already
+    pre-masked to ``-100`` on the user turn; no additional loss-masking logic is
+    applied here.  No neural-network inference is performed.
 
     Labels are NOT shifted — HF causal LM models perform the shift internally.
-    The first token label is always ``-100`` (ignored).
 
     Args:
-        original_vocab_size: Vocab size *before* item token registration.
-            Used to distinguish text tokens (id < original_vocab_size) from
-            item tokens (id >= original_vocab_size) for loss masking.
         pad_token_id: Token id used for padding positions.
-        loss_on: Which positions contribute to the loss.
-
-            - ``"all"``: all non-padding tokens.
-            - ``"items"``: only item tokens (``id >= original_vocab_size``).
-            - ``"text"``: only text tokens (``id < original_vocab_size``).
         max_length: If set, sequences are truncated to this length before padding.
         padding_side: ``"right"`` (default) or ``"left"``.
     """
 
     def __init__(
         self,
-        original_vocab_size: int,
         pad_token_id: int = 0,
-        loss_on: Literal["all", "items", "text"] = "all",
         max_length: Optional[int] = None,
         padding_side: Literal["right", "left"] = "right",
     ) -> None:
-        self.original_vocab_size = original_vocab_size
         self.pad_token_id = pad_token_id
-        self.loss_on = loss_on
         self.max_length = max_length
         self.padding_side = padding_side
 
-    def __call__(self, examples: list[torch.Tensor]) -> dict[str, torch.Tensor]:
-        if self.max_length is not None:
-            examples = [e[: self.max_length] for e in examples]
+    def __call__(
+        self, examples: list[dict[str, torch.Tensor]]
+    ) -> dict[str, torch.Tensor]:
+        input_ids_list = [ex["input_ids"] for ex in examples]
+        labels_list = [ex["labels"] for ex in examples]
 
-        max_len = max(len(e) for e in examples)
+        if self.max_length is not None:
+            input_ids_list = [t[: self.max_length] for t in input_ids_list]
+            labels_list = [t[: self.max_length] for t in labels_list]
+
+        max_len = max(len(t) for t in input_ids_list)
         B = len(examples)
 
         input_ids = torch.full((B, max_len), self.pad_token_id, dtype=torch.long)
         attention_mask = torch.zeros(B, max_len, dtype=torch.long)
         labels = torch.full((B, max_len), -100, dtype=torch.long)
 
-        orig_vocab = self.original_vocab_size
-
-        for i, t in enumerate(examples):
-            seq_len = len(t)
-
+        for i, (ids, lbls) in enumerate(zip(input_ids_list, labels_list)):
+            seq_len = len(ids)
             if self.padding_side == "right":
-                input_ids[i, :seq_len] = t
+                input_ids[i, :seq_len] = ids
                 attention_mask[i, :seq_len] = 1
-                label_positions = slice(1, seq_len)  # first token always -100
-                label_ids = t[1:]
+                labels[i, :seq_len] = lbls
             else:
                 pad_len = max_len - seq_len
-                input_ids[i, pad_len:] = t
+                input_ids[i, pad_len:] = ids
                 attention_mask[i, pad_len:] = 1
-                label_positions = slice(pad_len + 1, max_len)
-                label_ids = t[1:]
-
-            # Apply loss masking
-            if self.loss_on == "all":
-                masked = label_ids
-            elif self.loss_on == "items":
-                masked = torch.where(
-                    label_ids >= orig_vocab,
-                    label_ids,
-                    torch.tensor(-100, dtype=torch.long),
-                )
-            else:  # "text"
-                masked = torch.where(
-                    label_ids < orig_vocab,
-                    label_ids,
-                    torch.tensor(-100, dtype=torch.long),
-                )
-
-            labels[i, label_positions] = masked
+                labels[i, pad_len:] = lbls
 
         return {
             "input_ids": input_ids,

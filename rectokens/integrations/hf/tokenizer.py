@@ -24,8 +24,10 @@ class ItemAwareTokenizer(PreTrainedTokenizerFast):
 
     Special tokens registered (in order, starting at ``original_vocab_size``):
       - ``<item_L{l}_C{c}>``  for l in [0, num_levels), c in [0, codebook_size)
-      - ``<item_start>``       separator inserted between end-of-text and start of
+      - ``<|item_start|>``     separator inserted between end-of-text and start of
                                the next item's semantic IDs.
+      - ``<|item_end|>``       appended after the last semantic ID token of every
+                               item, marking the end of that item's code sequence.
     """
 
     def __init__(
@@ -49,7 +51,10 @@ class ItemAwareTokenizer(PreTrainedTokenizerFast):
 
         item_tokens = [
             f"<item_L{l}_C{c}>" for l in range(num_levels) for c in range(codebook_size)
-        ] + ["<item_start>"]  # separator: between end-of-text and item semantic IDs
+        ] + [
+            "<|item_start|>",
+            "<|item_end|>",
+        ]  # separator: between end-of-text and item semantic IDs
 
         existing = getattr(text_tokenizer, "additional_special_tokens", []) or []
         # Preserve order; skip duplicates so checkpoint reloads are idempotent.
@@ -83,9 +88,14 @@ class ItemAwareTokenizer(PreTrainedTokenizerFast):
 
     @property
     def item_sep_token_id(self) -> int:
-        """Token id for ``<item_start>``: the separator inserted between the end of
+        """Token id for ``<|item_start|>``: the separator inserted between the end of
         a text span and the start of the next item's semantic IDs."""
         return self._original_vocab_size + self.num_levels * self.codebook_size
+
+    @property
+    def item_end_token_id(self) -> int:
+        """Token id for ``<|item_end|>``: appended after each item's semantic IDs."""
+        return self._original_vocab_size + self.num_levels * self.codebook_size + 1
 
     def encode_sequence(self, parts: list[str | torch.Tensor]) -> list[int]:
         """Encode a mixed text/item sequence to a flat list of HF token ids.
@@ -95,16 +105,17 @@ class ItemAwareTokenizer(PreTrainedTokenizerFast):
         - ``torch.Tensor`` of shape ``(D,)``: a single item embedding, encoded by
           ``self.item_tokenizer`` and mapped to item token ids.
 
-        An ``<item_start>`` separator is inserted before an item's semantic IDs
+        An ``<|item_start|>`` separator is inserted before an item's semantic IDs
         whenever the immediately preceding element was a text span, marking the
         boundary between consecutive items' text and semantic IDs.
+        An ``<|item_end|>`` token is appended after each item's semantic IDs.
         """
         ids: list[int] = []
         for i, part in enumerate(parts):
             if isinstance(part, str):
                 ids.extend(self.encode(part, add_special_tokens=False))
             else:
-                # Insert <item_start> separator when transitioning from text → item.
+                # Insert <|item_start|> separator when transitioning from text → item.
                 if i > 0 and isinstance(parts[i - 1], str):
                     ids.append(self.item_sep_token_id)
                 if self.item_tokenizer is None:
@@ -126,13 +137,14 @@ class ItemAwareTokenizer(PreTrainedTokenizerFast):
                 codes = token_seq.codes[0]  # (num_levels,)
                 for l in range(self.num_levels):
                     ids.append(self.item_token_id(l, int(codes[l].item())))
+                ids.append(self.item_end_token_id)
         return ids
 
     def decode_sequence(self, ids: list[int]) -> list[str | TokenSequence]:
         """Decode a flat list of HF token ids back to text spans and item TokenSequences.
 
         Consecutive item tokens are grouped into a single ``TokenSequence`` per item.
-        ``<item_start>`` separator tokens are treated as boundaries and skipped.
+        ``<|item_start|>`` and ``<|item_end|>`` tokens are treated as boundaries and skipped.
         """
         result: list[str | TokenSequence] = []
         text_run: list[int] = []
@@ -157,8 +169,9 @@ class ItemAwareTokenizer(PreTrainedTokenizerFast):
                 item_run.clear()
 
         sep_id = self.item_sep_token_id
+        end_id = self.item_end_token_id
         for tid in ids:
-            if tid == sep_id:
+            if tid == sep_id or tid == end_id:
                 # Boundary marker — flush whatever is in progress and move on.
                 flush_text()
                 flush_item()
@@ -213,7 +226,7 @@ class ItemAwareTokenizer(PreTrainedTokenizerFast):
 
     @property
     def vocab_size(self) -> int:
-        """Vocabulary size after item token registration (includes ``<item_start>``)."""
+        """Vocabulary size after item token registration (includes ``<|item_start|>``)."""
         return len(self)
 
     @property

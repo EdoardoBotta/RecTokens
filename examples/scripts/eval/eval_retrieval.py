@@ -1,11 +1,11 @@
 """Evaluate next-item retrieval using constrained beam search.
 
 Uses precomputed token sequences as prompts (no re-encoding needed).
-Appends <item_start> to each prompt, runs constrained beam search,
+Appends <|item_start|> to each prompt, runs constrained beam search,
 and reports Recall@1, @5, @10.
 
 Usage:
-    python examples/scripts/eval/eval_retrieval.py examples/configs/eval_retrieval_beauty.gin
+    python examples/scripts/eval/eval_retrieval.py examples/configs/finetuning/eval_retrieval_beauty.gin
 """
 
 from __future__ import annotations
@@ -208,7 +208,7 @@ def main(
     item_sep_id = aware_tok.item_sep_token_id
 
     for eval_idx, user_idx in enumerate(sampled_indices):
-        # Prompt = precomputed context tokens + <item_start>
+        # Prompt = precomputed context tokens + <|item_start|>
         context = sequences[user_idx]  # 1D long tensor
         prompt = torch.cat([context, torch.tensor([item_sep_id], dtype=torch.long)])
         input_ids = prompt.unsqueeze(0).to(device)  # (1, seq_len)

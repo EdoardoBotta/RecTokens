@@ -1,9 +1,9 @@
 """Tests for ItemAwareTokenizer, InterleavedSequenceCollator, ItemAwareCausalLM.from_causal_lm.
 
 Verifies that:
-- Token IDs for item semantic codes and the <item_start> separator are computed
+- Token IDs for item semantic codes and the <|item_start|> separator are computed
   with the correct formula and fall within the extended vocabulary range.
-- encode_sequence inserts <item_start> exactly when transitioning text→item and
+- encode_sequence inserts <|item_start|> exactly when transitioning text→item and
   never between consecutive items.
 - Semantic IDs in the encoded sequence match the raw codes produced by the item
   tokenizer mapped to HF vocab space.
@@ -141,7 +141,9 @@ class TestItemAwareTokenizerIds(unittest.TestCase):
         assert self.orig == self.aware.original_vocab_size
 
     def test_vocab_size_after_registration(self) -> None:
-        expected = self.orig + NUM_LEVELS * CODEBOOK_SIZE + 1  # +1 for <item_start>
+        expected = (
+            self.orig + NUM_LEVELS * CODEBOOK_SIZE + 2
+        )  # +2 for <|item_start|> and <|item_end|>
         assert self.aware.vocab_size == expected
 
     def test_item_token_id_level0_code0(self) -> None:
@@ -167,8 +169,8 @@ class TestItemAwareTokenizerIds(unittest.TestCase):
         assert self.aware.item_sep_token_id < self.aware.vocab_size
 
     def test_sep_token_id_is_last_extended(self) -> None:
-        # <item_start> should be the very last registered token
-        assert self.aware.item_sep_token_id == self.aware.vocab_size - 1
+        # <|item_end|> should be the very last registered token
+        assert self.aware.item_end_token_id == self.aware.vocab_size - 1
 
     def test_item_tokens_are_contiguous_per_level(self) -> None:
         # Level l tokens occupy [item_token_id(l,0), item_token_id(l, CODEBOOK_SIZE-1)]
@@ -370,7 +372,7 @@ class TestDecodeSequence(unittest.TestCase):
         assert (result[0].codes == self.codes_a).all()
 
     def test_decode_separator_is_stripped(self) -> None:
-        """<item_start> token is consumed and not returned as a part."""
+        """<|item_start|> token is consumed and not returned as a part."""
         ids = [self.aware.item_sep_token_id] + self._item_ids(self.codes_a)
         result = self.aware.decode_sequence(ids)
         # Only the TokenSequence part; no None / separator element
@@ -541,7 +543,7 @@ class TestInterleavedSequenceCollator(unittest.TestCase):
         assert not (batch_all["labels"] == batch_items["labels"]).all()
 
     def test_loss_on_sep_token_masked_as_item(self) -> None:
-        """<item_start> separator has id >= orig_vocab; it is treated as item token."""
+        """<|item_start|> separator has id >= orig_vocab; it is treated as item token."""
         batch = self._collator(loss_on="items")([["a", self.item_emb]])
         labels = batch["labels"][0]
         ids = batch["input_ids"][0]

@@ -4,7 +4,7 @@ Loss is computed on the full sequence (text + item tokens) by default.
 Sequences must be precomputed with precompute_sequences.py before running.
 
 Usage:
-    python examples/scripts/training/finetune_qwen.py examples/configs/finetune_qwen_beauty.gin
+    python examples/scripts/training/finetune_qwen.py examples/configs/finetuning/finetune_qwen_beauty.gin
 """
 
 from __future__ import annotations
@@ -44,7 +44,6 @@ def train(
     weight_decay: float = 1e-2,
     max_length: int = 512,
     no_expand_vocab: bool = False,
-    loss_on: str = "all",
     output_dir: str = "checkpoints",
     log_every: int = 10,
     save_every: int = 5000,
@@ -101,9 +100,7 @@ def train(
 
     # 5. Collator — no GPU calls, safe to use multiple workers
     collator = PrecomputedSequenceCollator(
-        original_vocab_size=dataset.original_vocab_size,
         pad_token_id=pad_token_id,
-        loss_on=loss_on,
         max_length=max_length,
     )
 
