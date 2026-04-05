@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from rectokens.codebooks.euclidean import EuclideanCodebook
 from rectokens.core.quantizer import Quantizer, QuantizerOutput
 from rectokens.core.tokenizer import TokenSequence, Tokenizer
+from rectokens.ops.ema_update import ema_update
 from rectokens.quantizers.residual import ResidualQuantizer
 
 
@@ -202,99 +203,43 @@ class VQQuantizer(Quantizer, nn.Module):
     def _ema_update(self, x: torch.Tensor, codes: torch.Tensor) -> None:
         """Update assigned codebook entries via EMA; restart dead codes.
 
-        Only codes that received at least one assignment in this batch are
-        EMA-updated.  Applying ``mul_(decay)`` to every code including those
-        with zero assignments causes their accumulators to decay to 0 and their
-        codebook entries to be overwritten with ``0 / ε = 0``.
+        Delegates to :func:`~rectokens.ops.ema_update.ema_update`, which
+        dispatches to a fused Triton kernel on CUDA and a pure-PyTorch
+        fallback on CPU.  Both implementations are semantically identical:
 
-        Dead-code restart: ``_steps_since_active`` is incremented for every
-        code that receives no assignment in the current batch and reset to 0
-        for codes that do.  Any code whose counter reaches
-        ``restart_after_steps`` is replaced with a random encoder output from
-        the current batch.  This handles two distinct failure modes:
+        1. Scatter-accumulate ``cluster_size`` and ``embed_sum`` for each
+           codebook entry without materialising the ``(B, K)`` one-hot matrix.
+        2. Blend the new statistics into the EMA buffers for **active codes
+           only** (codes with zero assignments keep their existing accumulators
+           so they do not decay to zero).
+        3. Recompute each active codebook entry as
+           ``ema_embed_sum / max(ema_cluster_size, ε)``.
+        4. Increment ``_steps_since_active`` for inactive codes; reset to 0
+           for active ones.
+        5. Replace *dead* codes (counter ≥ ``restart_after_steps``) with a
+           random encoder output from the current batch and zero their EMA
+           statistics.
 
-        * **Never-used codes** — random-normal or K-means++ entries that the
-          encoder never visits; the counter starts at 0 and climbs until
-          restart.
+        Dead-code restart handles two failure modes:
+
+        * **Never-used codes** — random-normal or K-means++ entries the
+          encoder never visits; counter climbs from 0 until restart.
         * **Abandoned codes** — entries that *were* active but became stranded
-          as the encoder drifted.  Under the active-only EMA update their
-          ``_ema_cluster_size`` stays positive forever, so a simple
-          ``ema == 0`` check would never restart them.
+          as the encoder drifted.  The active-only EMA update keeps their
+          ``_ema_cluster_size`` positive forever, so a pure ``ema == 0`` check
+          would never restart them.
         """
-        k = self._codebook.size
-        one_hot = F.one_hot(codes, num_classes=k).float()  # (B, K)
-        cluster_size = one_hot.sum(dim=0)  # (K,)
-        embed_sum = one_hot.t() @ x  # (K, D)
-
-        active = cluster_size > 0  # (K,) bool
-
-        # EMA update restricted to active codes — torch.where avoids
-        # data-dependent boolean indexing that would break torch.compile.
-        new_ema_cluster_size = (
-            self.ema_decay * self._ema_cluster_size
-            + (1 - self.ema_decay) * cluster_size
-        )
-        self._ema_cluster_size.copy_(
-            torch.where(active, new_ema_cluster_size, self._ema_cluster_size)
-        )
-
-        new_ema_embed_sum = (
-            self.ema_decay * self._ema_embed_sum + (1 - self.ema_decay) * embed_sum
-        )
-        self._ema_embed_sum.copy_(
-            torch.where(active.unsqueeze(1), new_ema_embed_sum, self._ema_embed_sum)
-        )
-
-        n = self._ema_cluster_size.clamp(min=1e-5)  # (K,)
-        new_embeddings = self._ema_embed_sum / n.unsqueeze(1)  # (K, D)
         with torch.no_grad():
-            self._codebook.embeddings.copy_(
-                torch.where(
-                    active.unsqueeze(1), new_embeddings, self._codebook.embeddings
-                )
+            ema_update(
+                x=x,
+                codes=codes,
+                ema_cluster_size=self._ema_cluster_size,
+                ema_embed_sum=self._ema_embed_sum,
+                codebook=self._codebook.embeddings,
+                steps_since_active=self._steps_since_active,
+                decay=self.ema_decay,
+                restart_after_steps=self.restart_after_steps,
             )
-
-        # Dead-code restart: track consecutive steps without assignment and
-        # replace stranded codes with random batch samples.
-        #
-        # This handles two failure modes that the EMA-only check misses:
-        #   1. Codes never seeded into the data manifold (steps_since_active
-        #      increments from 0 until restart_after_steps is reached).
-        #   2. Codes that WERE active but became stranded as the encoder drifted
-        #      (ema_cluster_size stays > 0 forever under the active-only update,
-        #      so a pure ema==0 check would never restart them).
-        new_steps = torch.where(
-            active,
-            torch.zeros_like(self._steps_since_active),
-            self._steps_since_active + 1,
-        )
-        dead = new_steps >= self.restart_after_steps  # (K,) bool
-
-        # Always draw k replacements (one per code) and apply only for dead
-        # codes via torch.where — avoids data-dependent shape from n_dead.
-        rand_idx = torch.randint(len(x), (k,), device=x.device)
-        replacement = x[rand_idx]  # (K, D)
-        dead_expanded = dead.unsqueeze(1)  # (K, 1)
-
-        with torch.no_grad():
-            self._codebook.embeddings.copy_(
-                torch.where(dead_expanded, replacement, self._codebook.embeddings)
-            )
-        self._ema_cluster_size.copy_(
-            torch.where(
-                dead, torch.zeros_like(self._ema_cluster_size), self._ema_cluster_size
-            )
-        )
-        self._ema_embed_sum.copy_(
-            torch.where(
-                dead_expanded,
-                torch.zeros_like(self._ema_embed_sum),
-                self._ema_embed_sum,
-            )
-        )
-        self._steps_since_active.copy_(
-            torch.where(dead, torch.zeros_like(new_steps), new_steps)
-        )
 
     # Expose as nn.Module forward as well
     def forward(self, x: torch.Tensor) -> QuantizerOutput:
