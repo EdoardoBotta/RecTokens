@@ -223,48 +223,52 @@ Use this path when you want to encode sequences on-the-fly during training, or f
 import torch
 from transformers import AutoTokenizer
 from rectokens.integrations.hf.tokenizer import ItemAwareTokenizer
-from rectokens.integrations.hf.collator import InterleavedSequenceCollator
+from rectokens.integrations.hf.collator import PrecomputedSequenceCollator
 from rectokens.integrations.hf.model import ItemAwareCausalLM
 from rectokens.tokenizers.rqvae import RQVAETokenizer
 
 # 1. Load a pre-fitted item tokenizer (frozen)
-item_tok = RQVAETokenizer.load("item_tok.pt").cuda().eval()
+item_tok = RQVAETokenizer.load("item_tok.pt").eval()
 
 # 2. Wrap HF tokenizer to register item tokens in the vocabulary
 hf_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-2B")
 aware_tokenizer = ItemAwareTokenizer(
-    hf_tokenizer,
-    item_tokenizer=item_tok,
-    num_levels=3,
-    codebook_size=256,
+    hf_tokenizer, item_tokenizer=item_tok, num_levels=3, codebook_size=256
 )
 # vocab now includes 3×256 + 2 = 770 new tokens: <item_L0_C0> … <item_L2_C255> + <|item_start|> + <|item_end|>
 
 # 3. Load model and resize embeddings to the extended vocab
-# Optionally pass projection= to initialize item embeddings from RQ codebook vectors
 model = ItemAwareCausalLM.from_causal_lm(
     "Qwen/Qwen3.5-2B", aware_tokenizer, torch_dtype=torch.bfloat16
 ).cuda()
 
-# 4. Build training examples as lists of str | Tensor
-#    Strings are text; Tensors of shape (D,) are item embeddings
-examples = [
-    ["User watched ", item_embedding_a, " then ", item_embedding_b, ". Next: "],
-    ["User bought ", item_embedding_c, ". Recommend: "],
+# 4. Encode item embeddings on-the-fly to integer semantic IDs (codes)
+item_embs = torch.randn(3, item_tok.input_dim)  # (N, D) — replace with real embeddings
+with torch.no_grad():
+    codes = item_tok.encode(item_embs).codes.tolist()  # list of [c0, c1, c2] per item
+
+# 5. Build flat token-id sequences — items are semantic ID special tokens:
+#    <|item_start|> <item_L0_Cx> <item_L1_Cy> <item_L2_Cz> <|item_end|>
+def item_ids(c): return [aware_tokenizer.item_sep_token_id, *[aware_tokenizer.item_token_id(l, v) for l, v in enumerate(c)], aware_tokenizer.item_end_token_id]
+def text_ids(s): return aware_tokenizer.encode(s, add_special_tokens=False)
+
+sequences = [
+    torch.tensor(text_ids("User watched ") + item_ids(codes[0]) + text_ids(" then ") + item_ids(codes[1]) + text_ids(". Next: ")),
+    torch.tensor(text_ids("User bought ") + item_ids(codes[2]) + text_ids(". Recommend: ")),
 ]
 
-# 5. Collate — loss only on item token positions
-pad_id = hf_tokenizer.eos_token_id
-collator = InterleavedSequenceCollator(
-    aware_tokenizer,
-    loss_on="items",       # "all" | "items" | "text"
-    pad_token_id=pad_id,
-    max_length=512,
-)
+# 6. Build examples: labels are -100 at text positions, item token ids otherwise
+orig_vocab = aware_tokenizer.original_vocab_size
+examples = [
+    {"input_ids": s, "labels": torch.where(s >= orig_vocab, s, torch.full_like(s, -100))}
+    for s in sequences
+]
+
+# 7. Collate and train
+collator = PrecomputedSequenceCollator(pad_token_id=hf_tokenizer.eos_token_id, max_length=512)
 batch = collator(examples)
 # batch: {input_ids, attention_mask, labels} — ready for model(**batch)
 
-# 6. Training step
 optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
 out = model(**{k: v.cuda() for k, v in batch.items()})
 out.loss.backward()
@@ -302,10 +306,9 @@ model = ItemAwareCausalLM.from_causal_lm(
 ).cuda()
 
 # 4. Collate precomputed integer sequences
+# Labels are already masked in the precomputed data (loss on assistant turn only)
 collator = PrecomputedSequenceCollator(
-    original_vocab_size=dataset.original_vocab_size,
     pad_token_id=hf_tokenizer.eos_token_id,
-    loss_on="all",         # "all" | "items" | "text"
     max_length=512,
 )
 
