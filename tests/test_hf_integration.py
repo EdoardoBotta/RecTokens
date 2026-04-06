@@ -198,7 +198,7 @@ class TestItemAwareTokenizerNoItemTokenizer(unittest.TestCase):
         )
 
     def test_vocab_size(self) -> None:
-        expected = self.aware.original_vocab_size + NUM_LEVELS * CODEBOOK_SIZE + 1
+        expected = self.aware.original_vocab_size + NUM_LEVELS * CODEBOOK_SIZE + 2
         assert self.aware.vocab_size == expected
 
     def test_item_token_id(self) -> None:

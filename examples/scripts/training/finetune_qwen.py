@@ -12,7 +12,9 @@ from __future__ import annotations
 import os
 
 import gin
+import wandb
 import torch
+import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
 
 from examples.data.amazon import PrecomputedSequenceDataset
@@ -20,6 +22,49 @@ from examples.utils import parse_config
 from rectokens.integrations.hf.collator import PrecomputedSequenceCollator
 from rectokens.integrations.hf.model import ItemAwareCausalLM
 from rectokens.integrations.hf.tokenizer import ItemAwareTokenizer
+
+
+def freeze_pretrained_parameters(model: nn.Module, original_vocab_size: int) -> None:
+    """Freeze everything except new-token rows in embed_tokens and lm_head.
+
+    All transformer weights and the original vocabulary rows in the embedding
+    and lm_head matrices are frozen.  Only the rows at indices
+    ``[original_vocab_size, vocab_size)`` — i.e. the newly added item tokens —
+    receive gradient updates, which is enforced via a backward hook that zeroes
+    gradients for the frozen rows.
+
+    Args:
+        model: The model whose parameters should be (partially) frozen.
+        original_vocab_size: Number of tokens in the base model's vocabulary
+            before item tokens were added.  Rows at indices
+            ``[:original_vocab_size]`` in embed_tokens / lm_head are frozen.
+    """
+    for param in model.parameters():
+        param.requires_grad_(False)
+
+    def _mask_pretrained_grad(grad: torch.Tensor) -> torch.Tensor:
+        masked = grad.clone()
+        masked[:original_vocab_size] = 0.0
+        return masked
+
+    embed_weight = model.get_input_embeddings().weight
+    embed_weight.requires_grad_(True)
+    embed_weight.register_hook(_mask_pretrained_grad)
+
+    lm_head_weight = model.get_output_embeddings().weight
+    if lm_head_weight is not embed_weight:
+        lm_head_weight.requires_grad_(True)
+        lm_head_weight.register_hook(_mask_pretrained_grad)
+
+    n_total = sum(p.numel() for p in model.parameters())
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    new_tokens = embed_weight.shape[0] - original_vocab_size
+    tied = lm_head_weight is embed_weight
+    print(
+        f"[freeze_pretrained] Frozen all params except new-token rows "
+        f"(new_tokens={new_tokens}, lm_head_tied={tied}). "
+        f"Trainable params: {n_trainable:,} / {n_total:,}"
+    )
 
 
 def get_device() -> torch.device:
@@ -42,14 +87,14 @@ def train(
     num_epochs: int = 3,
     lr: float = 2e-4,
     weight_decay: float = 1e-2,
-    max_length: int = 512,
+    max_length: int = 256,
     no_expand_vocab: bool = False,
+    align_sid_finetuning: bool = False,
     output_dir: str = "checkpoints",
     log_every: int = 10,
     save_every: int = 5000,
     eval_every: int = 0,
     bf16: bool = False,
-    gradient_checkpointing: bool = False,
     wandb_project: str | None = None,
     wandb_run_name: str | None = None,
 ) -> None:
@@ -62,7 +107,7 @@ def train(
         eval_dataset = PrecomputedSequenceDataset(precomputed_eval_path)
 
     # 2. HF text tokenizer (needed for pad_token_id)
-    hf_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-2B")
+    hf_tokenizer = AutoTokenizer.from_pretrained(model_name)
     pad_token_id = hf_tokenizer.pad_token_id
     if pad_token_id is None:
         pad_token_id = hf_tokenizer.eos_token_id
@@ -74,13 +119,23 @@ def train(
         num_levels=num_levels,
         codebook_size=codebook_size,
     )
-    # Sanity-check: original_vocab_size from dataset must match
+    # Sanity-check: dataset metadata must match gin config
     if dataset.original_vocab_size != aware_tokenizer.original_vocab_size:
         raise ValueError(
             f"original_vocab_size mismatch: precomputed file has "
             f"{dataset.original_vocab_size}, but tokenizer has "
             f"{aware_tokenizer.original_vocab_size}. "
             "Make sure --model_name matches the one used during precomputation."
+        )
+    if dataset.num_levels != num_levels:
+        raise ValueError(
+            f"num_levels mismatch: precomputed file has {dataset.num_levels}, "
+            f"but gin config has {num_levels}."
+        )
+    if dataset.codebook_size != codebook_size:
+        raise ValueError(
+            f"codebook_size mismatch: precomputed file has {dataset.codebook_size}, "
+            f"but gin config has {codebook_size}."
         )
 
     # 4. Load model and (optionally) resize embeddings for item tokens
@@ -98,22 +153,31 @@ def train(
             f"(expected vocab size: {aware_tokenizer.vocab_size})"
         )
 
-    # 5. Collator — no GPU calls, safe to use multiple workers
+    # 5. (Optional) freeze all pretrained parameters; train only new-token rows
+    if align_sid_finetuning:
+        if no_expand_vocab:
+            raise ValueError(
+                "freeze_pretrained=True requires vocabulary expansion "
+                "(set no_expand_vocab=False)"
+            )
+        freeze_pretrained_parameters(model, aware_tokenizer.original_vocab_size)
+
+    # 6. Collator — no GPU calls, safe to use multiple workers
     collator = PrecomputedSequenceCollator(
         pad_token_id=pad_token_id,
         max_length=max_length,
     )
 
-    # 6. W&B setup
+    # 7. W&B setup
     if wandb_project:
-        os.environ["WANDB_PROJECT"] = wandb_project
-        if wandb_run_name:
-            os.environ["WANDB_NAME"] = wandb_run_name
+        wandb.login()
+        wandb.init(project=wandb_project, name=wandb_run_name)
         report_to = "wandb"
     else:
         report_to = "none"
+    report_to = "wandb"
 
-    # 7. TrainingArguments
+    # 8. TrainingArguments
     save_steps = save_every if save_every > 0 else log_every * 10
     eval_strategy = "steps" if (eval_dataset is not None and eval_every > 0) else "no"
     training_args = TrainingArguments(
@@ -124,7 +188,6 @@ def train(
         learning_rate=lr,
         weight_decay=weight_decay,
         bf16=bf16,
-        gradient_checkpointing=gradient_checkpointing,
         logging_steps=log_every,
         logging_strategy="steps",
         eval_strategy=eval_strategy,

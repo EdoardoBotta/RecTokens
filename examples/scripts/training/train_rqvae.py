@@ -48,6 +48,7 @@ def train(
     output_dir: str = "checkpoints/rqvae",
     learnable_codebook: bool = False,
     wandb_project: str | None = "rqvae-training",
+    profile: bool = False,
 ) -> RQVAETokenizer:
     if wandb_project is not None:
         params = locals()
@@ -92,12 +93,33 @@ def train(
 
     os.makedirs(output_dir, exist_ok=True)
 
+    profiler = None
+    if profile:
+        profile_dir = os.path.join(output_dir, "profile")
+        # wait=1 step, warmup=2 steps, active=3 steps — 6 steps total then stop.
+        profiler = torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(wait=1, warmup=2, active=3, repeat=1),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_dir),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        )
+        profiler.start()
+        print(f"[profile] Tracing enabled — trace will be written to {profile_dir}/")
+
+    profile_step = 0
+    _PROFILE_STEPS = 6  # wait(1) + warmup(2) + active(3)
+
     model.train()
     pbar = tqdm(range(1, num_epochs + 1), desc="train")
     for epoch in pbar:
-        total_recon = 0.0
-        total_commit = 0.0
-        total_unique = 0.0
+        total_recon = torch.zeros(1, device=device)
+        total_commit = torch.zeros(1, device=device)
+        total_unique = torch.zeros(1, device=device)
 
         for batch in loader:
             x = batch.x.float().to(device)
@@ -110,15 +132,25 @@ def train(
             (r_loss + commit_loss).backward()
             optimizer.step()
 
-            total_recon += r_loss.item()
-            total_commit += commit_loss.item()
-            total_unique += out.p_unique_ids.item()
+            total_recon += r_loss.detach()
+            total_commit += commit_loss.detach()
+            total_unique += out.p_unique_ids.detach()
+
+            if profiler is not None:
+                profiler.step()
+                profile_step += 1
+                if profile_step >= _PROFILE_STEPS:
+                    profiler.stop()
+                    print(
+                        f"[profile] Done. Open trace with: tensorboard --logdir {profile_dir}"
+                    )
+                    return model
 
         if epoch % log_every == 0:
             n = len(loader)
-            avg_recon = total_recon / n
-            avg_commit = total_commit / n
-            avg_p_unique = total_unique / n
+            avg_recon = total_recon.item() / n
+            avg_commit = total_commit.item() / n
+            avg_p_unique = total_unique.item() / n
             pbar.set_postfix(
                 recon=f"{avg_recon:.4f}",
                 commit=f"{avg_commit:.4f}",

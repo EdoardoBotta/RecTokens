@@ -10,21 +10,6 @@ from rectokens.modules.sparse_linear import SparseLinear
 from rectokens.modules.constraint_enforcer import ConstraintEnforcer
 from typing import Optional
 from torch import nn
-from transformers.modeling_outputs import CausalLMOutputWithPast
-
-
-class RandomModel(nn.Module):
-    def __init__(self, vocab_size, hidden_size):
-        super().__init__()
-        self.embedding = nn.Embedding(vocab_size, hidden_size)
-        self.linear = nn.Linear(hidden_size, vocab_size, bias=False)
-
-    def forward(
-        self, input_ids, past_key_values=None, use_cache=False, attention_mask=None
-    ):
-        x = self.embedding(input_ids)
-        logits = self.linear(x)  # (B, seq_len, vocab_size)
-        return CausalLMOutputWithPast(logits=logits, past_key_values=None)
 
 
 @torch.inference_mode()

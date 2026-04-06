@@ -322,7 +322,7 @@ def main(
         print("\nBuilding per-item samples (description_to_sid, sid_to_description)...")
         item_samples = build_item_samples(codes_table, item_texts, chat_tok)
 
-    # 7. For each seq_split, build sequence samples, mix, shuffle, save
+    # 7. For each seq_split, build sequence samples, shuffle, save
     for seq_split in seq_splits:
         print(f"\nBuilding sequence samples for seq_split='{seq_split}'...")
         seq_samples = build_sequence_samples(
@@ -333,13 +333,12 @@ def main(
             max_seq_len=max_seq_len,
         )
 
-        all_samples = item_samples + seq_samples
-        random.shuffle(all_samples)
+        random.shuffle(seq_samples)
 
         out_path = os.path.join(output_dir, f"{split}_{seq_split}.pt")
         torch.save(
             {
-                "samples": all_samples,
+                "samples": seq_samples,
                 "original_vocab_size": aware_tok.original_vocab_size,
                 "num_levels": num_levels,
                 "codebook_size": codebook_size,
@@ -350,8 +349,6 @@ def main(
                     "item_tok_path": item_tok_path,
                     "max_seq_len": max_seq_len,
                     "templates": [
-                        "description_to_sid",
-                        "sid_to_description",
                         "sid_sequence_to_sid",
                         "description_sequence_to_sid",
                         "mixed_sequence_to_sid",
@@ -362,7 +359,31 @@ def main(
             },
             out_path,
         )
-        print(f"  Saved {len(all_samples)} samples to {out_path}")
+        print(f"  Saved {len(seq_samples)} samples to {out_path}")
+
+        # Save item samples (description↔SID) to a separate file
+        if include_item_samples:
+            item_out_path = os.path.join(output_dir, f"{split}_{seq_split}_item.pt")
+            torch.save(
+                {
+                    "samples": item_samples,
+                    "original_vocab_size": aware_tok.original_vocab_size,
+                    "num_levels": num_levels,
+                    "codebook_size": codebook_size,
+                    "meta": {
+                        "split": split,
+                        "seq_split": seq_split,
+                        "model_name": model_name,
+                        "item_tok_path": item_tok_path,
+                        "templates": [
+                            "description_to_sid",
+                            "sid_to_description",
+                        ],
+                    },
+                },
+                item_out_path,
+            )
+            print(f"  Saved {len(item_samples)} item samples to {item_out_path}")
 
     print("\nPrecomputation complete.")
 

@@ -15,11 +15,24 @@ from rectokens.schemas.state import (
     GenerationState,
 )
 from rectokens.schemas.config import GenerationConfig
-from rectokens.decoding.constrained_decoding import (
-    RandomModel,
-    decode_one_step,
-)
+from rectokens.decoding.constrained_decoding import decode_one_step
 from transformers.modeling_outputs import CausalLMOutputWithPast
+
+
+class RandomModel(nn.Module):
+    def __init__(self, vocab_size, hidden_size):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, hidden_size)
+        self.linear = nn.Linear(hidden_size, vocab_size, bias=False)
+
+    def forward(
+        self, input_ids, past_key_values=None, use_cache=False, attention_mask=None
+    ):
+        x = self.embedding(input_ids)
+        logits = self.linear(x)  # (B, seq_len, vocab_size)
+        return CausalLMOutputWithPast(logits=logits, past_key_values=None)
+
+
 from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 
 device = torch.device("cuda")
