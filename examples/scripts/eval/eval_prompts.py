@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import gin
 import torch
-import torch.nn.functional as F
+from torch import nn
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from examples.data.amazon import AmazonReviews
 from examples.utils import parse_config
+from rectokens.core.tokenizer import Tokenizer
 from rectokens.tokenizers.rqvae import RQVAETokenizer
 from rectokens.tokenizers.rq_kmeans import RQKMeansTokenizer
 from rectokens.integrations.hf.model import ItemAwareCausalLM
@@ -57,11 +58,12 @@ def build_prompt_ids(
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
     ]
-    text: str = hf_tokenizer.apply_chat_template(
+    text = hf_tokenizer.apply_chat_template(  # type: ignore[assignment]
         messages,
         tokenize=False,
         add_generation_prompt=True,
     )
+    assert isinstance(text, str)
     ids = aware_tok.encode(text, add_special_tokens=False)
     return torch.tensor(ids, dtype=torch.long).unsqueeze(0).to(device)
 
@@ -69,7 +71,7 @@ def build_prompt_ids(
 @torch.no_grad()
 def encode_all_items(
     item_embs: torch.Tensor,
-    item_tok: RQVAETokenizer,
+    item_tok: Tokenizer,
     aware_tok: ItemAwareTokenizer,
     batch_size: int,
     device: torch.device,
@@ -77,11 +79,11 @@ def encode_all_items(
     """Encode all item embeddings to code tensors of shape ``(num_items, num_levels)``."""
     num_items = item_embs.shape[0]
     all_codes = torch.zeros(num_items, aware_tok.num_levels, dtype=torch.long)
-    try:
-        param = next(item_tok.parameters())
-        enc_dtype = param.dtype
-    except StopIteration:
-        enc_dtype = torch.float32
+    enc_dtype = torch.float32
+    if isinstance(item_tok, nn.Module):
+        params = list(item_tok.parameters())
+        if params:
+            enc_dtype = params[0].dtype
 
     for start in range(0, num_items, batch_size):
         end = min(start + batch_size, num_items)
@@ -89,6 +91,21 @@ def encode_all_items(
         token_seq = item_tok.encode(batch)
         all_codes[start:end] = token_seq.codes.cpu()
     return all_codes
+
+
+def find_expected_item(
+    prompt: str,
+    item_texts: list[str],
+    codes_table: torch.Tensor,
+) -> tuple[int, tuple[int, ...]] | None:
+    """Search item_texts for one whose text is a substring of the prompt.
+
+    Returns ``(item_id, codes)`` for the first match, or ``None``.
+    """
+    for item_id, text in enumerate(item_texts):
+        if text.strip() in prompt:
+            return item_id, tuple(codes_table[item_id].tolist())
+    return None
 
 
 @gin.configurable
@@ -109,24 +126,6 @@ def main(
     bf16: bool = False,
     seed: int = 42,
 ) -> None:
-    """
-    Args:
-        model_dir: Path to the finetuned model directory (output of finetune_qwen.py).
-        hf_model_name: Base HF model name used during finetuning (e.g. Qwen/Qwen3.5-2B).
-        item_tok_path: Path to the item tokenizer checkpoint (.pt).
-        item_tok_type: "rqvae" or "rq_kmeans".
-        num_levels: Number of RQ levels (must match finetuning config).
-        codebook_size: Codebook size per level (must match finetuning config).
-        root: Root directory for the AmazonReviews dataset (used to build the item trie).
-        split: Dataset split name (e.g. "beauty").
-        prompts: List of plain-text user prompt strings.
-        max_new_tokens: Maximum total tokens to generate per prompt.
-        do_sample: Use sampling; if False greedy decoding is used.
-        temperature: Sampling temperature (only used when do_sample=True).
-        encode_batch_size: Batch size for encoding item embeddings into codes.
-        bf16: Load the model in bfloat16.
-        seed: Random seed.
-    """
     torch.manual_seed(seed)
     device = get_device()
     print(f"Device: {device}")
@@ -158,17 +157,26 @@ def main(
     model: ItemAwareCausalLM = ItemAwareCausalLM.from_causal_lm(
         model_dir, aware_tok, torch_dtype=dtype
     )
-    model.to(device)
+    model.to(device)  # type: ignore[call-arg]
     model.eval()
 
-    # 4. Build item trie from the full item catalog
+    # 4. Build item trie and lookup structures from the full item catalog
     print(f"Loading item catalog: root={root}, split={split}")
     raw_data = AmazonReviews(root=root, split=split)
     item_embs = raw_data.data["item"]["x"]
+    item_texts: list[str] = [str(t) for t in raw_data.data["item"]["text"]]
     print(f"  {item_embs.shape[0]} items — encoding to codes...")
     codes_table = encode_all_items(
         item_embs, item_tok, aware_tok, encode_batch_size, device
     )
+
+    # Reverse lookup: code tuple → item_id
+    codes_to_item_id: dict[tuple[int, ...], int] = {}
+    for item_id, codes in enumerate(codes_table.tolist()):
+        key = tuple(codes)
+        if key not in codes_to_item_id:
+            codes_to_item_id[key] = item_id
+
     print("  Building item trie...")
     trie = aware_tok.build_item_trie(codes_table.to(device))
     print("  Trie built.")
@@ -177,6 +185,9 @@ def main(
     print("\n" + "=" * 60)
     for i, prompt in enumerate(prompts):
         print(f"\n[{i + 1}/{len(prompts)}] Prompt: {prompt!r}")
+
+        # Find expected item by matching its text against the prompt
+        expected = find_expected_item(prompt, item_texts, codes_table)
 
         input_ids = build_prompt_ids(prompt, hf_tokenizer, aware_tok, device)
 
@@ -193,15 +204,36 @@ def main(
                 eos_token_id=hf_tokenizer.eos_token_id,
             )
 
-        # Decode using decode_sequence so item tokens display as code tuples
+        # Decode: item tokens → code tuples, text tokens → plain string
         parts = aware_tok.decode_sequence(new_token_ids.tolist())
         response_parts: list[str] = []
+        generated_item_ids: list[int] = []
         for part in parts:
             if isinstance(part, str):
                 response_parts.append(part)
             else:
-                response_parts.append(str(tuple(part.codes.tolist())))
-        print(f"Response: {''.join(response_parts).strip()}")
+                codes = tuple(part.codes.tolist())
+                response_parts.append(str(codes))
+                item_id = codes_to_item_id.get(codes)
+                if item_id is not None:
+                    generated_item_ids.append(item_id)
+
+        print(f"Response:      {''.join(response_parts).strip()}")
+
+        # Show generated item text(s)
+        for rank, item_id in enumerate(generated_item_ids):
+            label = (
+                "Generated item"
+                if len(generated_item_ids) == 1
+                else f"Generated item {rank + 1}"
+            )
+            print(f"{label} [{item_id}]: {item_texts[item_id]}")
+
+        # Show expected item text if found in the prompt
+        if expected is not None:
+            exp_id, exp_codes = expected
+            print(f"Expected SID:  {exp_codes}")
+            print(f"Expected item [{exp_id}]: {item_texts[exp_id]}")
         print("-" * 60)
 
 
