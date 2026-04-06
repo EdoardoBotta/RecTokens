@@ -1,0 +1,22 @@
+main.model_dir = "checkpoints/qwen/beauty/final"
+main.hf_model_name = "Qwen/Qwen3.5-2B"
+main.item_tok_path = "checkpoints/rqvae/beauty/final.pt"
+main.item_tok_type = "rqvae"
+main.num_levels = 3
+main.codebook_size = 256
+main.root = "data/amazon"
+main.split = "beauty"
+
+# Prompt 1: description -> SID from the training set.
+# Expected SID codes: [38, 104, 33]
+# Prompt 2: generic knowledge question to check for catastrophic forgetting.
+main.prompts = [
+    "Given the following product description, output its Semantic ID.Title: OPI Nail Lacquer, Simmer and Shimmer, 0.5-Fluid Ounce; Brand: OPI; Categories: ['Beauty', 'Makeup', 'Nails', 'Nail Polish']; Price: 12.0; Description: OPI Burlesque Colors;",
+    "What is the capital of France and what is it known for?",
+]
+
+main.max_new_tokens = 64
+main.do_sample = False
+main.encode_batch_size = 512
+main.bf16 = True
+main.seed = 42

@@ -111,6 +111,10 @@ class ItemAwareCausalLM(PreTrainedModel):
         hf_model: Optional[nn.Module] = None,
     ) -> None:
         super().__init__(config)
+        # Ensure all_tied_weights_keys is initialised even if tie_weights() ran
+        # before self.model was set (e.g. when called via from_pretrained).
+        if not hasattr(self, "all_tied_weights_keys"):
+            self.all_tied_weights_keys: dict[str, str] = {}
         if hf_model is not None:
             self.model = hf_model
         elif config.base_model_config is not None:
@@ -126,12 +130,16 @@ class ItemAwareCausalLM(PreTrainedModel):
         return self.model(*args, **kwargs)
 
     def get_input_embeddings(self):
+        if not hasattr(self, "model"):
+            return None
         return self.model.get_input_embeddings()
 
     def set_input_embeddings(self, value):
         self.model.set_input_embeddings(value)
 
     def get_output_embeddings(self):
+        if not hasattr(self, "model"):
+            return None
         return self.model.get_output_embeddings()
 
     def set_output_embeddings(self, new_embeddings):

@@ -13,6 +13,130 @@ from torch import nn
 
 
 @torch.inference_mode()
+def generate_with_item_constraints(
+    model: nn.Module,
+    input_ids: torch.Tensor,
+    trie: CompactCSRTrie,
+    item_sep_token_id: int,
+    num_levels: int,
+    max_new_tokens: int = 128,
+    do_sample: bool = False,
+    temperature: float = 1.0,
+    eos_token_id: Optional[int] = None,
+) -> torch.Tensor:
+    """Token-by-token generation that constrains item codes to the valid catalog.
+
+    Runs unconstrained autoregressive decoding until ``<|item_start|>`` is produced,
+    then switches to trie-constrained decoding for exactly ``num_levels`` steps (one
+    per RQ level), then returns to unconstrained decoding.  The switch repeats every
+    time the model generates another ``<|item_start|>``, so multi-item responses are
+    handled automatically.
+
+    Only batch size 1 is supported; beam search is not used — use
+    :func:`autoregressive_generate` when top-k retrieval is needed.
+
+    Args:
+        model: Causal LM with a KV-cache-compatible forward pass (``use_cache=True``).
+        input_ids: Prompt token IDs, shape ``(1, seq_len)``.
+        trie: :class:`~rectokens.schemas.compact_csr_trie.CompactCSRTrie` built via
+            ``ItemAwareTokenizer.build_item_trie``.
+        item_sep_token_id: HF vocab ID of ``<|item_start|>``.
+        num_levels: Number of RQ levels; exactly this many tokens are constrained after
+            each ``<|item_start|>``.
+        max_new_tokens: Maximum total tokens to generate (includes constrained ones).
+        do_sample: Sample from the distribution; greedy (argmax) when ``False``.
+        temperature: Softmax temperature applied during sampling (ignored when
+            ``do_sample=False``).
+        eos_token_id: Stop generation when this token is produced.
+
+    Returns:
+        1-D long tensor of generated token IDs, **excluding** the input prompt.
+    """
+    assert input_ids.shape[0] == 1, (
+        "generate_with_item_constraints supports batch_size=1 only"
+    )
+    device = input_ids.device
+
+    generated: list[int] = []
+    past_kv = None
+    cur_input = input_ids
+
+    # Constrained-phase bookkeeping
+    constrained_steps_left: int = 0
+    item_level: int = 0  # which RQ level we're constraining (0-indexed)
+    cur_node: Optional[torch.Tensor] = None  # shape (1,) BFS node in trie
+    code_tokens_so_far: list[int] = []  # HF token IDs chosen so far within this item
+
+    for _ in range(max_new_tokens):
+        output = model(cur_input, past_key_values=past_kv, use_cache=True)
+        logits: torch.Tensor = output.logits[:, -1, :]  # (1, vocab_size)
+        past_kv = output.past_key_values
+
+        # Track CSR outputs so we can update cur_node after the token is chosen
+        next_nodes: Optional[torch.Tensor] = None
+        valid_idxs: Optional[torch.Tensor] = None
+
+        # ── Constrained phase: mask logits to valid item tokens ──────────────
+        if constrained_steps_left > 0:
+            if item_level < len(trie.dense_mask_by_layer):
+                # Dense lookup: trie.dense_mask_by_layer[l] is a bool tensor indexed
+                # by all previously chosen item tokens at levels 0..l-1.
+                layer_mask: torch.Tensor = trie.dense_mask_by_layer[item_level]
+                if item_level > 0:
+                    layer_mask = layer_mask[tuple(code_tokens_so_far)]
+                logits[0, ~layer_mask] = float("-inf")
+            else:
+                # CSR trie: constrained_node_transition masks logits in-place and
+                # returns the valid branch info needed to advance cur_node.
+                constraint_state = ConstraintState(
+                    step=item_level, trie=trie, cur_node=cur_node
+                )
+                next_nodes, valid_idxs, logits = constrained_node_transition(
+                    logits, constraint_state
+                )
+
+        # ── Sample or pick greedily ───────────────────────────────────────────
+        if do_sample:
+            probs = F.softmax(logits[0] / temperature, dim=-1)
+            next_token = int(torch.multinomial(probs, num_samples=1).item())
+        else:
+            next_token = int(logits[0].argmax().item())
+
+        # ── Advance constrained state ─────────────────────────────────────────
+        if constrained_steps_left > 0:
+            code_tokens_so_far.append(next_token)
+
+            if item_level == len(trie.dense_mask_by_layer) - 1:
+                # End of dense phase → compute the CSR root node from the full dense path.
+                # dense_states is indexed by the tuple of dense-phase token IDs.
+                cur_node = trie.dense_states[tuple(code_tokens_so_far)].reshape(1)
+            elif item_level >= len(trie.dense_mask_by_layer):
+                # CSR phase → find which branch corresponds to the chosen token.
+                assert next_nodes is not None and valid_idxs is not None
+                branch_match = valid_idxs[0] == next_token  # (max_branches,)
+                cur_node = next_nodes[0, branch_match]  # (1,)
+
+            item_level += 1
+            constrained_steps_left -= 1
+
+        else:
+            # ── Unconstrained phase: watch for <|item_start|> ────────────────
+            if next_token == item_sep_token_id:
+                constrained_steps_left = num_levels
+                item_level = 0
+                cur_node = None
+                code_tokens_so_far = []
+
+        generated.append(next_token)
+        cur_input = torch.tensor([[next_token]], dtype=torch.long, device=device)
+
+        if eos_token_id is not None and next_token == eos_token_id:
+            break
+
+    return torch.tensor(generated, dtype=torch.long, device=device)
+
+
+@torch.inference_mode()
 def autoregressive_generate(
     model: nn.Module,
     trie: CompactCSRTrie,
