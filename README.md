@@ -221,6 +221,7 @@ Use this path when you want to encode sequences on-the-fly during training, or f
 
 ```python
 import torch
+from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from rectokens.integrations.hf.tokenizer import ItemAwareTokenizer
 from rectokens.integrations.hf.collator import PrecomputedSequenceCollator
@@ -266,13 +267,15 @@ examples = [
 
 # 7. Collate and train
 collator = PrecomputedSequenceCollator(pad_token_id=hf_tokenizer.eos_token_id, max_length=512)
-batch = collator(examples)
-# batch: {input_ids, attention_mask, labels} — ready for model(**batch)
+loader = DataLoader(examples, batch_size=2, collate_fn=collator)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
-out = model(**{k: v.cuda() for k, v in batch.items()})
-out.loss.backward()
-optimizer.step()
+model.train()
+for batch in loader:
+    optimizer.zero_grad()
+    out = model(**{k: v.cuda() for k, v in batch.items()})
+    out.loss.backward()
+    optimizer.step()
 ```
 
 ### Training on precomputed sequences
@@ -313,10 +316,14 @@ collator = PrecomputedSequenceCollator(
 )
 
 loader = DataLoader(dataset, batch_size=8, collate_fn=collator)
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
+model.train()
 for batch in loader:
+    optimizer.zero_grad()
     out = model(**{k: v.cuda() for k, v in batch.items()})
     out.loss.backward()
-    # ...
+    optimizer.step()
 ```
 
 ### Constrained generation at inference time
