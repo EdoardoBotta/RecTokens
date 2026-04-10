@@ -9,17 +9,45 @@ description = "A tokenizer library for sequential recommendation systems"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
+authors = [
+    { name = "Edoardo Botta", email = "botta.edoardo@gmail.com" },
+]
+keywords = ["recommendation", "tokenizer", "vector quantization", "sequential recommendation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "torch>=2.0",
     "numpy>=1.24",
+    "triton>=2.0",
 ]
 
 [project.optional-dependencies]
 faiss = ["faiss-cpu>=1.7"]
+hf = ["transformers>=4.30"]
 dev = [
     "pytest>=7.0",
     "pytest-cov",
 ]
+all = [
+    "faiss-cpu>=1.7",
+    "transformers>=4.30",
+]
+
+[project.urls]
+Homepage = "https://github.com/EdoardoBotta/RecTokens"
+Repository = "https://github.com/EdoardoBotta/RecTokens"
+Issues = "https://github.com/EdoardoBotta/RecTokens/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rectokens"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -29,6 +29,12 @@ With `K` codes per level and `L` levels, the scheme supports `K^L` unique item I
 ## Installation
 
 ```bash
+pip install rectokens
+```
+
+For development or editable installs:
+
+```bash
 pip install -e .
 
 # With development dependencies
