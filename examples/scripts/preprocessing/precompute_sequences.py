@@ -139,10 +139,12 @@ class ChatTokenizer:
         """
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         for msg in sample["messages"]:
-            messages.append({
-                "role": msg["role"],
-                "content": self._content_to_str(msg["content"]),
-            })
+            messages.append(
+                {
+                    "role": msg["role"],
+                    "content": self._content_to_str(msg["content"]),
+                }
+            )
 
         # Full conversation → input_ids
         full_text = self.aware_tok.apply_chat_template(
@@ -366,7 +368,9 @@ def main(
                 f"\nBuilding per-item samples for seq_split='{seq_split}' "
                 f"({'train' if seq_split == 'train' else 'eval'} items only)..."
             )
-            item_samples = build_item_samples(codes_table, item_texts, chat_tok, item_mask)
+            item_samples = build_item_samples(
+                codes_table, item_texts, chat_tok, item_mask
+            )
             item_out_path = os.path.join(output_dir, f"{split}_{seq_split}_item.pt")
             torch.save(
                 {

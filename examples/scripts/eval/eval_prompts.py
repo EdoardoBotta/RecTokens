@@ -257,7 +257,6 @@ def main(
             print(f"Expected item [{exp_id}]: {item_texts[exp_id]}")
         print("-" * 60)
 
-
     # 6. Run beam search prompts
     if beam_prompts:
         gen_cfg = GenerationConfig(
@@ -269,7 +268,9 @@ def main(
             print(f"\n[{i + 1}/{len(beam_prompts)}] Prompt: {prompt!r}")
             input_ids = build_prompt_ids(prompt, hf_tokenizer, aware_tok, device)
             # Returns (1, num_beams, num_levels) item token IDs
-            beam_output = model.generate(input_ids, trie=trie, generation_config=gen_cfg)
+            beam_output = model.generate(
+                input_ids, trie=trie, generation_config=gen_cfg
+            )
             results = decode_beam_results(beam_output, aware_tok, codes_to_item_id)
             for rank, (codes, item_id) in enumerate(results):
                 title = item_texts[item_id] if item_id is not None else "<unknown>"

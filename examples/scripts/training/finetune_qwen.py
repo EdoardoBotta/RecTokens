@@ -15,7 +15,13 @@ import gin
 import wandb
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainerCallback, TrainingArguments
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    Trainer,
+    TrainerCallback,
+    TrainingArguments,
+)
 
 from examples.data.amazon import AmazonReviews, PrecomputedSequenceDataset
 from examples.scripts.preprocessing.precompute_sequences import encode_all_items
@@ -89,7 +95,9 @@ class EvalCallback(TrainerCallback):
             prompt_ids = torch.cat(
                 [
                     input_ids[:, :first_idx],
-                    torch.tensor([[self.aware_tok.item_sep_token_id]], device=self.device),
+                    torch.tensor(
+                        [[self.aware_tok.item_sep_token_id]], device=self.device
+                    ),
                 ],
                 dim=1,
             )
@@ -110,7 +118,8 @@ class EvalCallback(TrainerCallback):
             ]
 
             true_codes = tuple(
-                int(labels[0, first_idx + 1 + l].item()) - self.aware_tok.item_token_id(l, 0)
+                int(labels[0, first_idx + 1 + l].item())
+                - self.aware_tok.item_token_id(l, 0)
                 for l in range(self.aware_tok.num_levels)
             )
 
@@ -358,7 +367,9 @@ def train(
         raw_data = AmazonReviews(root=amazon_root, split=amazon_split)
         all_item_embs = raw_data.data["item"]["x"]
         print(f"  Encoding {all_item_embs.shape[0]} items for trie...")
-        all_codes = encode_all_items(all_item_embs, item_tok, aware_tokenizer, 512, device)
+        all_codes = encode_all_items(
+            all_item_embs, item_tok, aware_tokenizer, 512, device
+        )
         trie = aware_tokenizer.build_item_trie(all_codes.to(device))
         print("  Trie built.")
         gen_cfg = GenerationConfig(
