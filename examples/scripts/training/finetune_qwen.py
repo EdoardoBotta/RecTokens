@@ -23,7 +23,7 @@ from transformers import (
     TrainingArguments,
 )
 
-from examples.data.amazon import AmazonReviews, PrecomputedSequenceDataset
+from examples.data.amazon import AmazonReviews, ConcatPrecomputedDataset, PrecomputedSequenceDataset
 from examples.scripts.preprocessing.precompute_sequences import encode_all_items
 from examples.utils import parse_config
 from rectokens.decoding.constrained_decoding import autoregressive_generate
@@ -38,9 +38,10 @@ from rectokens.tokenizers.rq_kmeans import RQKMeansTokenizer
 class EvalCallback(TrainerCallback):
     """Runs at every Trainer eval step and reports perplexity and item-grounding recall.
 
-    Perplexity is computed over all samples in ``eval_dataset``.
     Recall@1/5/10 is computed on samples whose assistant response starts with
-    ``<|item_start|>`` (text-to-SID tasks), using constrained beam search.
+    ``<|item_start|>`` (SID-generation tasks), using constrained beam search.
+    Perplexity is computed on the remaining samples (non-SID tasks such as
+    ``sid_to_description``) where the assistant produces plain text.
     """
 
     def __init__(
@@ -70,6 +71,7 @@ class EvalCallback(TrainerCallback):
 
         total_loss = 0.0
         total_tokens = 0
+        n_ppl = 0
         recall_at = {c: 0 for c in self.cutoffs}
         n_recall = 0
 
@@ -77,72 +79,73 @@ class EvalCallback(TrainerCallback):
             input_ids = sample["input_ids"].unsqueeze(0).to(self.device)
             labels = sample["labels"].unsqueeze(0).to(self.device)
 
-            # Perplexity contribution
-            out = model(input_ids=input_ids, labels=labels)
-            n_tok = int((labels != -100).sum().item())
-            total_loss += out.loss.item() * n_tok
-            total_tokens += n_tok
-
-            # Recall: only for samples whose assistant response starts with <|item_start|>
             non_masked = (labels[0] != -100).nonzero(as_tuple=True)[0]
             if len(non_masked) == 0:
                 continue
             first_idx = non_masked[0].item()
-            if labels[0, first_idx].item() != self.aware_tok.item_sep_token_id:
-                continue
-
-            # Build prompt: everything before the assistant item tokens + <|item_start|>
-            prompt_ids = torch.cat(
-                [
-                    input_ids[:, :first_idx],
-                    torch.tensor(
-                        [[self.aware_tok.item_sep_token_id]], device=self.device
-                    ),
-                ],
-                dim=1,
+            is_sid_task = (
+                labels[0, first_idx].item() == self.aware_tok.item_sep_token_id
             )
 
-            generated = autoregressive_generate(
-                model=model,
-                trie=self.trie,
-                input_ids=prompt_ids,
-                generation_config=self.gen_config,
-            )
-            beams = generated[0]  # (k, num_levels)
-            predicted = [
-                tuple(
-                    int(beams[b, l].item()) - self.aware_tok.item_token_id(l, 0)
+            if is_sid_task:
+                # Recall: build prompt up to (but not including) the assistant SID,
+                # then prepend <|item_start|> and run constrained beam search.
+                prompt_ids = torch.cat(
+                    [
+                        input_ids[:, :first_idx],
+                        torch.tensor(
+                            [[self.aware_tok.item_sep_token_id]], device=self.device
+                        ),
+                    ],
+                    dim=1,
+                )
+                generated = autoregressive_generate(
+                    model=model,
+                    trie=self.trie,
+                    input_ids=prompt_ids,
+                    generation_config=self.gen_config,
+                )
+                beams = generated[0]  # (k, num_levels)
+                predicted = [
+                    tuple(
+                        int(beams[b, l].item()) - self.aware_tok.item_token_id(l, 0)
+                        for l in range(self.aware_tok.num_levels)
+                    )
+                    for b in range(beams.shape[0])
+                ]
+                true_codes = tuple(
+                    int(labels[0, first_idx + 1 + l].item())
+                    - self.aware_tok.item_token_id(l, 0)
                     for l in range(self.aware_tok.num_levels)
                 )
-                for b in range(beams.shape[0])
-            ]
+                for cutoff in self.cutoffs:
+                    if true_codes in predicted[:cutoff]:
+                        recall_at[cutoff] += 1
+                n_recall += 1
+            else:
+                # Perplexity: only for non-SID tasks (e.g. sid_to_description).
+                out = model(input_ids=input_ids, labels=labels)
+                n_tok = int((labels != -100).sum().item())
+                total_loss += out.loss.item() * n_tok
+                total_tokens += n_tok
+                n_ppl += 1
 
-            true_codes = tuple(
-                int(labels[0, first_idx + 1 + l].item())
-                - self.aware_tok.item_token_id(l, 0)
-                for l in range(self.aware_tok.num_levels)
-            )
+        metrics: dict[str, float] = {}
+        ppl_str = ""
+        if n_ppl > 0:
+            perplexity = torch.exp(torch.tensor(total_loss / total_tokens)).item()
+            metrics["eval/perplexity"] = perplexity
+            ppl_str = f"  PPL={perplexity:.4f}"
 
-            for cutoff in self.cutoffs:
-                if true_codes in predicted[:cutoff]:
-                    recall_at[cutoff] += 1
-            n_recall += 1
-
-        perplexity = torch.exp(torch.tensor(total_loss / total_tokens)).item()
-        metrics: dict[str, float] = {"eval/perplexity": perplexity}
+        recall_str = ""
         if n_recall > 0:
             for c in self.cutoffs:
                 metrics[f"eval/recall@{c}"] = recall_at[c] / n_recall
+            recall_str = "  " + "  ".join(
+                f"Recall@{c}={metrics[f'eval/recall@{c}']:.4f}" for c in self.cutoffs
+            )
 
-        recall_str = "  ".join(
-            f"Recall@{c}={metrics[f'eval/recall@{c}']:.4f}"
-            for c in self.cutoffs
-            if f"eval/recall@{c}" in metrics
-        )
-        print(
-            f"[Eval] step={step}  PPL={perplexity:.4f}"
-            + (f"  {recall_str}" if recall_str else "")
-        )
+        print(f"[Eval] step={step}{ppl_str}{recall_str}")
         if wandb.run is not None:
             wandb.log(metrics, step=step)
 
@@ -202,9 +205,10 @@ def get_device() -> torch.device:
 
 @gin.configurable
 def train(
-    precomputed_path: str = gin.REQUIRED,
-    precomputed_eval_path: str | None = None,
+    precomputed_path: "str | list[str]" = gin.REQUIRED,
+    precomputed_eval_path: "str | list[str] | None" = None,
     model_name: str = "Qwen/Qwen3.5-2B",
+    tokenizer_name: str | None = None,
     num_levels: int = 3,
     codebook_size: int = 256,
     batch_size: int = 8,
@@ -232,14 +236,19 @@ def train(
 ) -> None:
     device = get_device()
 
-    # 1. Load precomputed datasets
-    dataset = PrecomputedSequenceDataset(precomputed_path)
+    # 1. Load precomputed datasets (single path or list of paths)
+    def _load_dataset(path):
+        if isinstance(path, str):
+            return PrecomputedSequenceDataset(path)
+        return ConcatPrecomputedDataset(path)
+
+    dataset = _load_dataset(precomputed_path)
     eval_dataset = None
     if precomputed_eval_path:
-        eval_dataset = PrecomputedSequenceDataset(precomputed_eval_path)
+        eval_dataset = _load_dataset(precomputed_eval_path)
 
     # 2. HF text tokenizer (needed for pad_token_id)
-    hf_tokenizer = AutoTokenizer.from_pretrained(model_name)
+    hf_tokenizer = AutoTokenizer.from_pretrained(tokenizer_name or model_name)
     pad_token_id = hf_tokenizer.pad_token_id
     if pad_token_id is None:
         pad_token_id = hf_tokenizer.eos_token_id

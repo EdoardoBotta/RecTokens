@@ -191,6 +191,47 @@ class PrecomputedSequenceDataset(Dataset):
         return self.samples[idx]  # {"input_ids": tensor, "labels": tensor}
 
 
+class ConcatPrecomputedDataset(Dataset):
+    """Concatenates multiple precomputed dataset files into a single dataset.
+
+    Validates that all files share the same ``original_vocab_size``,
+    ``num_levels``, and ``codebook_size`` before merging their samples.
+
+    Args:
+        paths: List of ``.pt`` file paths produced by ``precompute_sequences.py``.
+    """
+
+    def __init__(self, paths: list) -> None:
+        datasets = [PrecomputedSequenceDataset(p) for p in paths]
+        ref = datasets[0]
+        for ds in datasets[1:]:
+            if ds.original_vocab_size != ref.original_vocab_size:
+                raise ValueError(
+                    f"original_vocab_size mismatch across precomputed files: "
+                    f"{ref.original_vocab_size} vs {ds.original_vocab_size}"
+                )
+            if ds.num_levels != ref.num_levels:
+                raise ValueError(
+                    f"num_levels mismatch across precomputed files: "
+                    f"{ref.num_levels} vs {ds.num_levels}"
+                )
+            if ds.codebook_size != ref.codebook_size:
+                raise ValueError(
+                    f"codebook_size mismatch across precomputed files: "
+                    f"{ref.codebook_size} vs {ds.codebook_size}"
+                )
+        self.samples: list = [s for ds in datasets for s in ds.samples]
+        self.original_vocab_size: int = ref.original_vocab_size
+        self.num_levels: int = ref.num_levels
+        self.codebook_size: int = ref.codebook_size
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> dict:
+        return self.samples[idx]
+
+
 class ItemData(Dataset):
     def __init__(
         self,

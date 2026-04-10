@@ -1,28 +1,27 @@
-train.precomputed_path = "data/precomputed/beauty/beauty_train_item.pt"
-train.precomputed_eval_path = "data/precomputed/beauty/beauty_eval_item.pt"
-train.model_name = "Qwen/Qwen3.5-2B"
+train.precomputed_path = [
+    "data/precomputed/beauty/beauty_train.pt",
+    "data/precomputed/beauty/beauty_train_item.pt",
+]
+train.precomputed_eval_path = [
+    "data/precomputed/beauty/beauty_eval.pt",
+    "data/precomputed/beauty/beauty_eval_item.pt",
+]
+train.model_name = "checkpoints/qwen/beauty/checkpoint-8625"
+train.tokenizer_name = "Qwen/Qwen3.5-2B"
 train.num_levels = 3
 train.codebook_size = 256
-train.batch_size = 4
-train.grad_accum = 2
-train.num_epochs = 3
-train.lr = 5e-4
+train.batch_size = 1
+train.grad_accum = 4
+train.num_epochs = 1
+train.lr = 2e-5
 train.weight_decay = 1e-2
 train.max_length = 256
-train.no_expand_vocab = False
-train.output_dir = "checkpoints/qwen/beauty"
+train.no_expand_vocab = True
+train.align_sid_finetuning = False
+train.output_dir = "checkpoints/qwen/beauty/finetune"
 train.log_every = 10
 train.save_every = 10000
 train.eval_every = 200
 train.bf16 = True
 train.wandb_project = "rectokens"
-train.wandb_run_name = "beauty-align-sid"
-train.align_sid_finetuning = True
-
-# Item grounding eval (recall via beam search, fired on Trainer eval steps)
-train.amazon_root = "data/amazon"
-train.amazon_split = "beauty"
-train.item_tok_path = "checkpoints/rqvae/beauty/final.pt"
-train.item_tok_type = "rqvae"
-train.item_eval_beam_size = 20
-train.item_eval_top_k = 10
+train.wandb_run_name = "beauty-finetune"
