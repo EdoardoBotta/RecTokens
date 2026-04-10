@@ -12,8 +12,26 @@ main.split = "beauty"
 # Prompt 2: generic knowledge question to check for catastrophic forgetting.
 main.prompts = [
     "Given the following product description, output its Semantic ID.Title: OPI Nail Lacquer, Simmer and Shimmer, 0.5-Fluid Ounce; Brand: OPI; Categories: ['Beauty', 'Makeup', 'Nails', 'Nail Polish']; Price: 12.0; Description: OPI Burlesque Colors;",
-    "What is the capital of France and what is it known for?",
+    "Given the following product description, output its Semantic ID.Title: Cococare Coconut Oil 100% Pure 4 Oz; Brand: Cococare; Categories: ['Beauty', 'Skin Care', 'Body', 'Moisturizers', 'Oils']; Price: 5.65; Description: Cococare Coconut Oil 100% Pure 4 Oz Essential & Body Message Oils at HerbsCity store.;",
+    "Given the following product description, output its Semantic ID.Title: Mebco Tortoise Shower Detangler; Brand: Fromm; Categories: ['Beauty', 'Hair Care', 'Styling Tools', 'Combs']; Price: 2.95; Description: Popular professional comb styles in an elegant tortoise finish. Come in several different styles.;",
+    "Given the following product description, output its Semantic ID.Title: Duo Lash Adhesive, Clear, 0.25 Ounce; Brand: Duo; Categories: ['Beauty', 'Tools & Accessories', 'Makeup Brushes & Tools', 'Eyelash Tools', 'Fake Eyelashes & Adhesives']; Price: 3.99; Description: Ask any makeup artist and they will tell you, it's not the lashes; it's the adhesive.;",
+    "Given the following product description, output its Semantic ID.Title: derma e Anti-Wrinkle Vitamin A Retinyl Palmitate Creme, 4-Ounce Jar; Brand: Derma E; Categories: ['Beauty', 'Skin Care', 'Face', 'Creams & Moisturizers', 'Fluids & Lotions', 'Lotions']; Price: 9.49; Description: This refining formula helps increase cellular renewal to diminish the appearance of age lines and wrinkles on the skin while leaving it soft, smooth, and supple.;",
+    "Given the following product description, output its Semantic ID.Title: Sleek Makeup Face Contour Kit (Dark); Brand: Sleek; Categories: ['Beauty', 'Makeup', 'Face', 'Powder']; Price: 9.98; Description: After contouring, apply a light, girly blush to the apples of the cheeks.;",
+    "Given the following product description, output its Semantic ID.Title: Red Cherry False Eyelashes #WSP (Pack of 3); Brand: Red Cherry; Categories: ['Beauty', 'Tools & Accessories', 'Makeup Brushes & Tools', 'Eyelash Tools', 'Fake Eyelashes & Adhesives']; Price: 7.49; Description: Red Cherry lashes are made from 100% human hair;",
+    "Given the following product description, output its Semantic ID.Title: Armani Code By Giorgio Armani For Women. Eau De Parfume Spray 1.7 oz; Brand: Unknown; Categories: ['Beauty', 'Fragrance', \"Women's\", 'Eau de Parfum']; Price: 51.34; Description: Launched by the design house of Giorgio Armani.;",
+    "Given the following product description, output its Semantic ID.Title: eb5 Facial Cream (4 Ounces); Brand: eb5; Categories: ['Beauty', 'Skin Care', 'Face', 'Creams & Moisturizers', 'Fluids & Lotions', 'Lotions']; Price: 34.0; Description: Created by Research Pharmacist Robert Heldfond, eb5 Facial Cream is designed for men and women, seniors and baby boomers alike, who are concerned about aging skin.;",
+    "Given the following product description, output its Semantic ID.Title: Burt's Bees Sensitive Night Cream, 1.8 Ounces; Brand: Burt's Bees; Categories: ['Beauty', 'Skin Care', 'Face', 'Creams & Moisturizers', 'Night Creams']; Price: 10.5; Description: Wake up to skin that's more moisturized with Burt's Bees Sensitive Night Cream.;",
 ]
+
+main.beam_prompts = [
+    "Give me recommendations for a product similar to OPI Nail Lacquer, Simmer and Shimmer.",
+    "Give me recommendations for a product similar to Cococare Coconut Oil 100% Pure 4 Oz.",
+    "Give me recommendations for a product similar to Duo Lash Adhesive, Clear.",
+    "Give me recommendations for a product similar to Burt's Bees Sensitive Night Cream.",
+    "Give me recommendations for a product similar to derma e Anti-Wrinkle Vitamin A Retinyl Palmitate Creme.",
+]
+main.num_beams = 4
+main.beam_size = 4
 
 main.max_new_tokens = 64
 main.do_sample = False

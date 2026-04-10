@@ -96,7 +96,7 @@ def generate_with_item_constraints(
                 )
 
         # ── Sample or pick greedily ───────────────────────────────────────────
-        if do_sample:
+        if do_sample and temperature > 0.0:
             probs = F.softmax(logits[0] / temperature, dim=-1)
             next_token = int(torch.multinomial(probs, num_samples=1).item())
         else:
@@ -268,12 +268,17 @@ def decode_one_step(
                 logits, constraint_state=constrained_generation_state.constraint_state
             )
 
-    probas_batched = F.softmax(logits / config.temperature, dim=-1)
     # Sample beam_size candidates per current beam: (current_batch, beam_size)
-    samples_batched = torch.multinomial(probas_batched, num_samples=beam_size)
-    sampled_log_probas = torch.log(
-        torch.gather(probas_batched, 1, samples_batched)
-    )  # (current_batch, beam_size)
+    if config.temperature == 0.0:
+        # Greedy top-k: take the beam_size highest-logit tokens directly
+        _, samples_batched = logits.topk(beam_size, dim=-1)
+        sampled_log_probas = F.log_softmax(logits, dim=-1).gather(1, samples_batched)
+    else:
+        probas_batched = F.softmax(logits / config.temperature, dim=-1)
+        samples_batched = torch.multinomial(probas_batched, num_samples=beam_size)
+        sampled_log_probas = torch.log(
+            torch.gather(probas_batched, 1, samples_batched)
+        )  # (current_batch, beam_size)
 
     if is_first_step:
         # Pick top-k candidates per batch item from beam_size samples

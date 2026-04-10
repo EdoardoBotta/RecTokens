@@ -102,49 +102,34 @@ def encode_all_items(
 # ---------------------------------------------------------------------------
 
 
-def _get_special_token_id(aware_tok: ItemAwareTokenizer, token: str) -> int:
-    tid = aware_tok.convert_tokens_to_ids(token)
-    if tid is None or tid == aware_tok.unk_token_id:
-        raise ValueError(f"Special token {token!r} not found in tokenizer vocabulary")
-    return tid
-
-
-def _render_content(content: list[dict], aware_tok: ItemAwareTokenizer) -> list[int]:
-    """Convert a list of content blocks to a flat list of token IDs."""
-    ids: list[int] = []
-    for block in content:
-        if block["type"] == "text":
-            ids.extend(aware_tok.encode(block["text"], add_special_tokens=False))
-        else:  # "item"
-            ids.append(aware_tok.item_sep_token_id)
-            for l, c in enumerate(block["codes"]):
-                ids.append(aware_tok.item_token_id(l, c))
-            ids.append(aware_tok.item_end_token_id)
-    return ids
-
-
 class ChatTokenizer:
-    """Caches per-role token IDs and renders chat samples to {input_ids, labels}."""
+    """Encodes chat samples to {input_ids, labels} using the model's own chat template.
+
+    Item SIDs are rendered as their token-name strings (e.g. ``<item_L0_C5>``) so
+    that ``ItemAwareTokenizer.encode`` maps them to the correct single token IDs.
+    Labels are -100 on the system and user turns; loss is computed on the assistant
+    response only.
+    """
 
     def __init__(self, aware_tok: ItemAwareTokenizer) -> None:
         self.aware_tok = aware_tok
-        self.im_start = _get_special_token_id(aware_tok, "<|im_start|>")
-        self.im_end = _get_special_token_id(aware_tok, "<|im_end|>")
-        self.newline = aware_tok.encode("\n", add_special_tokens=False)
-        self.system_role = aware_tok.encode("system", add_special_tokens=False)
-        self.user_role = aware_tok.encode("user", add_special_tokens=False)
-        self.assistant_role = aware_tok.encode("assistant", add_special_tokens=False)
-        self.system_content = aware_tok.encode(SYSTEM_PROMPT, add_special_tokens=False)
 
-        # Pre-build the system turn (always masked)
-        self._system_turn: list[int] = (
-            [self.im_start]
-            + self.system_role
-            + self.newline
-            + self.system_content
-            + [self.im_end]
-            + self.newline
-        )
+    def _content_to_str(self, content: list[dict]) -> str:
+        """Render mixed text/item content blocks as a plain string.
+
+        Item codes are expressed as their token name strings so the tokenizer
+        treats each as a single special token.
+        """
+        parts = []
+        for block in content:
+            if block["type"] == "text":
+                parts.append(block["text"])
+            else:  # "item"
+                parts.append("<|item_start|>")
+                for l, c in enumerate(block["codes"]):
+                    parts.append(f"<item_L{l}_C{c}>")
+                parts.append("<|item_end|>")
+        return "".join(parts)
 
     def encode(self, sample: dict) -> dict[str, torch.Tensor]:
         """Convert a chat_templates sample dict to {input_ids, labels} tensors.
@@ -152,28 +137,30 @@ class ChatTokenizer:
         The system turn and every user turn are masked (-100 in labels).
         Loss is computed on the assistant's response tokens only.
         """
-        input_ids: list[int] = list(self._system_turn)
-        labels: list[int] = [-100] * len(self._system_turn)
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        for msg in sample["messages"]:
+            messages.append({
+                "role": msg["role"],
+                "content": self._content_to_str(msg["content"]),
+            })
 
-        for message in sample["messages"]:
-            role = message["role"]
-            content_ids = _render_content(message["content"], self.aware_tok)
-            role_ids = self.user_role if role == "user" else self.assistant_role
+        # Full conversation → input_ids
+        full_text = self.aware_tok.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False
+        )
+        full_ids = self.aware_tok.encode(full_text, add_special_tokens=False)
 
-            prefix = [self.im_start] + role_ids + self.newline
-            suffix = content_ids + [self.im_end] + self.newline
+        # Prompt only (system + user turns) → determines where assistant response starts
+        prompt_messages = [m for m in messages if m["role"] != "assistant"]
+        prompt_text = self.aware_tok.apply_chat_template(
+            prompt_messages, tokenize=False, add_generation_prompt=True
+        )
+        prompt_len = len(self.aware_tok.encode(prompt_text, add_special_tokens=False))
 
-            input_ids.extend(prefix)
-            input_ids.extend(suffix)
-
-            if role == "assistant":
-                labels.extend([-100] * len(prefix))
-                labels.extend(suffix)  # loss on assistant response
-            else:
-                labels.extend([-100] * (len(prefix) + len(suffix)))
+        labels = [-100] * prompt_len + full_ids[prompt_len:]
 
         return {
-            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "input_ids": torch.tensor(full_ids, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
         }
 
@@ -187,22 +174,38 @@ def build_item_samples(
     codes_table: torch.Tensor,
     item_texts: list[str],
     chat_tok: ChatTokenizer,
+    item_mask: torch.Tensor | None = None,
 ) -> list[dict]:
-    """Build two samples per item: description→SID and SID→description."""
-    samples: list[dict] = []
-    num_items = codes_table.shape[0]
+    """Build two samples per item: description→SID and SID→description.
 
-    for iid in range(num_items):
+    Args:
+        codes_table: ``(num_items, num_levels)`` code tensor for all items.
+        item_texts: Item text descriptions aligned with ``codes_table``.
+        chat_tok: ChatTokenizer used to encode samples.
+        item_mask: Optional boolean tensor of shape ``(num_items,)`` selecting
+            which items to include. If ``None``, all items are used.
+    """
+    samples: list[dict] = []
+    indices = (
+        item_mask.nonzero(as_tuple=True)[0].tolist()
+        if item_mask is not None
+        else range(codes_table.shape[0])
+    )
+
+    for i, iid in enumerate(indices):
         codes = codes_table[iid].tolist()
         text = str(item_texts[iid])
 
-        samples.append(chat_tok.encode(description_to_sid(text, codes)))
-        samples.append(chat_tok.encode(sid_to_description(codes, text)))
+        text_to_sid_sample = description_to_sid(text, codes)
+        sid_to_text_sample = sid_to_description(codes, text)
 
-        if iid % 10000 == 0:
-            print(f"  Built item samples {iid}/{num_items}...", flush=True)
+        samples.append(chat_tok.encode(text_to_sid_sample))
+        samples.append(chat_tok.encode(sid_to_text_sample))
 
-    print(f"  Built {len(samples)} item samples for {num_items} items.")
+        if i % 10000 == 0:
+            print(f"  Built item samples {i}/{len(indices)}...", flush=True)
+
+    print(f"  Built {len(samples)} item samples for {len(indices)} items.")
     return samples
 
 
@@ -315,14 +318,9 @@ def main(
     chat_tok = ChatTokenizer(aware_tok)
 
     item_texts = raw_data.data["item"]["text"]
+    is_train_mask = raw_data.data["item"]["is_train"]  # bool tensor, shape (num_items,)
 
-    # 6. Build per-item samples (description↔SID) — shared across all splits
-    item_samples: list[dict] = []
-    if include_item_samples:
-        print("\nBuilding per-item samples (description_to_sid, sid_to_description)...")
-        item_samples = build_item_samples(codes_table, item_texts, chat_tok)
-
-    # 7. For each seq_split, build sequence samples, shuffle, save
+    # 6. For each seq_split, build sequence samples, shuffle, save
     for seq_split in seq_splits:
         print(f"\nBuilding sequence samples for seq_split='{seq_split}'...")
         seq_samples = build_sequence_samples(
@@ -361,8 +359,14 @@ def main(
         )
         print(f"  Saved {len(seq_samples)} samples to {out_path}")
 
-        # Save item samples (description↔SID) to a separate file
+        # Save item samples (description↔SID) to a separate file, split by is_train
         if include_item_samples:
+            item_mask = is_train_mask if seq_split == "train" else ~is_train_mask
+            print(
+                f"\nBuilding per-item samples for seq_split='{seq_split}' "
+                f"({'train' if seq_split == 'train' else 'eval'} items only)..."
+            )
+            item_samples = build_item_samples(codes_table, item_texts, chat_tok, item_mask)
             item_out_path = os.path.join(output_dir, f"{split}_{seq_split}_item.pt")
             torch.save(
                 {
@@ -373,6 +377,7 @@ def main(
                     "meta": {
                         "split": split,
                         "seq_split": seq_split,
+                        "item_split": "train" if seq_split == "train" else "eval",
                         "model_name": model_name,
                         "item_tok_path": item_tok_path,
                         "templates": [

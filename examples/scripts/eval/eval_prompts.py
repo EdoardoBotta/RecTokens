@@ -25,6 +25,7 @@ from rectokens.tokenizers.rq_kmeans import RQKMeansTokenizer
 from rectokens.integrations.hf.model import ItemAwareCausalLM
 from rectokens.integrations.hf.tokenizer import ItemAwareTokenizer
 from rectokens.decoding.constrained_decoding import generate_with_item_constraints
+from rectokens.schemas.config import GenerationConfig
 
 
 SYSTEM_PROMPT = "You are a helpful recommendation assistant."
@@ -93,6 +94,23 @@ def encode_all_items(
     return all_codes
 
 
+def decode_beam_results(
+    beam_output: torch.Tensor,
+    aware_tok: ItemAwareTokenizer,
+    codes_to_item_id: dict[tuple[int, ...], int],
+) -> list[tuple[tuple[int, ...], int | None]]:
+    """Decode beam search output ``(1, k, num_levels)`` to ``(code_tuple, item_id)`` pairs."""
+    results = []
+    for beam_idx in range(beam_output.shape[1]):
+        hf_ids = beam_output[0, beam_idx]  # (num_levels,)
+        codes = tuple(
+            int((tid.item() - aware_tok.original_vocab_size) % aware_tok.codebook_size)
+            for tid in hf_ids
+        )
+        results.append((codes, codes_to_item_id.get(codes)))
+    return results
+
+
 def find_expected_item(
     prompt: str,
     item_texts: list[str],
@@ -119,6 +137,9 @@ def main(
     root: str = "data/amazon",
     split: str = "beauty",
     prompts: list = gin.REQUIRED,  # type: ignore[assignment]
+    beam_prompts: list = [],  # type: ignore[assignment]
+    num_beams: int = 4,
+    beam_size: int = 4,
     max_new_tokens: int = 128,
     do_sample: bool = False,
     temperature: float = 1.0,
@@ -235,6 +256,25 @@ def main(
             print(f"Expected SID:  {exp_codes}")
             print(f"Expected item [{exp_id}]: {item_texts[exp_id]}")
         print("-" * 60)
+
+
+    # 6. Run beam search prompts
+    if beam_prompts:
+        gen_cfg = GenerationConfig(
+            steps=num_levels, k=num_beams, beam_size=beam_size, temperature=temperature
+        )
+        print("\n" + "=" * 60)
+        print("BEAM SEARCH PROMPTS")
+        for i, prompt in enumerate(beam_prompts):
+            print(f"\n[{i + 1}/{len(beam_prompts)}] Prompt: {prompt!r}")
+            input_ids = build_prompt_ids(prompt, hf_tokenizer, aware_tok, device)
+            # Returns (1, num_beams, num_levels) item token IDs
+            beam_output = model.generate(input_ids, trie=trie, generation_config=gen_cfg)
+            results = decode_beam_results(beam_output, aware_tok, codes_to_item_id)
+            for rank, (codes, item_id) in enumerate(results):
+                title = item_texts[item_id] if item_id is not None else "<unknown>"
+                print(f"  Beam {rank + 1}: codes={codes} → {title}")
+            print("-" * 60)
 
 
 if __name__ == "__main__":

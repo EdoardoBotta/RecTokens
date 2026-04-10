@@ -72,6 +72,11 @@ class ItemAwareTokenizer(PreTrainedTokenizerFast):
 
         assert self.convert_tokens_to_ids("<item_L0_C0>") == self._original_vocab_size
 
+        # Copy chat_template from the source text tokenizer — it lives on the
+        # Python wrapper, not on the Rust tokenizer_object passed to super().__init__.
+        if getattr(text_tokenizer, "chat_template", None) is not None:
+            self.chat_template = text_tokenizer.chat_template
+
         self.item_tokenizer = item_tokenizer
         self.num_levels = num_levels
         self.codebook_size = codebook_size

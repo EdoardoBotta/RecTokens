@@ -125,6 +125,18 @@ class ItemAwareCausalLM(PreTrainedModel):
             raise ValueError(
                 "Either hf_model or config.base_model_config must be provided."
             )
+        # Tell HF's loader that tied weights from the inner model (prefixed with
+        # "model.") are intentionally absent from the checkpoint — they will be
+        # restored by tie_weights() and should not be reported as MISSING.
+        # NOTE: newer transformers versions use a dict {tied_key: source_key};
+        # older versions used a list of strings. Handle both.
+        inner_tied = getattr(type(self.model), "_tied_weights_keys", None) or {}
+        if isinstance(inner_tied, dict):
+            self._tied_weights_keys = {
+                f"model.{k}": f"model.{v}" for k, v in inner_tied.items()
+            }
+        else:
+            self._tied_weights_keys = {f"model.{k}": "" for k in inner_tied}
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)

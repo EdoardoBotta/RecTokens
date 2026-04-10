@@ -142,21 +142,14 @@ class AmazonReviews(InMemoryDataset, PreprocessingMixin):
 
         sentences = item_data.apply(
             lambda row: (
-                "Title: "
-                + str(row["title"])
-                + "; "
-                + "Brand: "
+                str(row["title"])
+                + " by "
                 + str(row["brand"])
-                + "; "
-                + "Categories: "
-                + str(row["categories"][0])
-                + "; "
-                + "Price: "
+                + " is categorized under "
+                + ", ".join(row["categories"][0])
+                + " and is priced at "
                 + str(row["price"])
-                + "; "
-                + "Description: "
-                + str(row["description"])
-                + "; "
+                + "."
             ),
             axis=1,
         )
@@ -228,7 +221,7 @@ class PrecomputedSequenceDataset(Dataset):
 
     def __init__(self, path: str) -> None:
         data = torch.load(path, weights_only=False)
-        self.samples: list[dict] = data["samples"]
+        self.samples: list[dict] = data["samples"] #[:100] # TODO(ebotta): Debug statement to try to overfit 100 examples. Remove this.
         self.original_vocab_size: int = data["original_vocab_size"]
         self.num_levels: int = data["num_levels"]
         self.codebook_size: int = data["codebook_size"]
