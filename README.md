@@ -4,7 +4,7 @@
 
 # RecTokens
 
-A tokenizer library for sequential recommendation systems. RecTokens converts continuous item embeddings into discrete multi-level token sequences using **Residual Quantization (RQ)**, enabling large item catalogs to be represented as compact token IDs suitable for autoregressive Transformer-based recommendation models.
+A tokenizer library for sequential recommendation systems. RecTokens converts continuous item embeddings into discrete multi-level token sequences using **Residual Quantization (RQ)**, enabling large item catalogs to be represented as compact token IDs suitable for Language model finetuning and/or classic Transformer-based recommendation models.
 
 ## Overview
 
