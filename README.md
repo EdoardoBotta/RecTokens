@@ -459,7 +459,7 @@ This section benchmarks `fused_linear_constrained_node_transition` — the kerne
 
 At small vocabulary (N ≤ 512) the fused kernel is **slower** than the two-kernel approach (0.68–0.74×). Here the matmul is small enough that cuBLAS (used by `torch.compile(nn.Linear)`) outperforms the hand-written Triton tile, and the savings from avoiding a second kernel launch do not compensate.
 
-Against CPU trie traversal the fused kernel wins by **17–625×**, with the largest margins at large batch sizes where the CPU baseline scales linearly with B while the GPU kernel processes the entire batch in parallel. The speedup narrows at N=150k (17–95×) as GPU compute time grows, but the fused kernel remains the clear winner across the board.
+Against CPU trie traversal the fused kernel wins by **20–737×**. The dominant axis is batch size: at B=1024 speedups reach 470–737× for N ≤ 8192, because the CPU baseline traverses B items serially while the GPU processes the whole batch in parallel. At N=150k the speedup contracts at small batch (20× at B=32) as GPU compute time grows, but remains substantial at larger batch (80× at B=256, 98× at B=1024). The fused kernel is the clear winner at every grid point.
 
 **vs PyTorch (dense)** — `torch.compile(nn.Linear)` followed by `vtnk_pytorch`, which applies a validity mask to the logits in a separate GPU pass after the matmul.
 ![fused vs pytorch](out/heatmap_fused_vs_pytorch.jpg)
