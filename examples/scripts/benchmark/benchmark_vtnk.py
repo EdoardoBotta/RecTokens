@@ -146,7 +146,9 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity):
             with torch.no_grad():
                 if "fused" in alg_set:
                     record["ms_fused"] = run_bench(
-                        lambda: fused_linear_constrained_node_transition(a, weight.T, cs)
+                        lambda: fused_linear_constrained_node_transition(
+                            a, weight.T, cs
+                        )
                     )
                 if "kernel" in alg_set:
                     record["ms_kernel"] = run_bench(
@@ -158,7 +160,9 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity):
                     )
                 if "sparse_pytorch" in alg_set:
                     record["ms_sparse_pytorch"] = run_bench(
-                        lambda: sparse_linear_pytorch_compiled(a, weight, cur_node, csr, step=0)
+                        lambda: sparse_linear_pytorch_compiled(
+                            a, weight, cur_node, csr, step=0
+                        )
                     )
             if "trie_cpu" in alg_set:
                 record["ms_trie_cpu"] = run_bench_cpu(
@@ -166,13 +170,21 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity):
                 )
 
             if "fused" in alg_set and "kernel" in alg_set:
-                record["speedup_fused_vs_kernel"] = record["ms_kernel"] / record["ms_fused"]
+                record["speedup_fused_vs_kernel"] = (
+                    record["ms_kernel"] / record["ms_fused"]
+                )
             if "fused" in alg_set and "pytorch" in alg_set:
-                record["speedup_fused_vs_pytorch"] = record["ms_pytorch"] / record["ms_fused"]
+                record["speedup_fused_vs_pytorch"] = (
+                    record["ms_pytorch"] / record["ms_fused"]
+                )
             if "fused" in alg_set and "sparse_pytorch" in alg_set:
-                record["speedup_fused_vs_sparse_pytorch"] = record["ms_sparse_pytorch"] / record["ms_fused"]
+                record["speedup_fused_vs_sparse_pytorch"] = (
+                    record["ms_sparse_pytorch"] / record["ms_fused"]
+                )
             if "fused" in alg_set and "trie_cpu" in alg_set:
-                record["speedup_fused_vs_trie_cpu"] = record["ms_trie_cpu"] / record["ms_fused"]
+                record["speedup_fused_vs_trie_cpu"] = (
+                    record["ms_trie_cpu"] / record["ms_fused"]
+                )
 
             records.append(record)
 
@@ -231,7 +243,9 @@ if __name__ == "__main__":
     print(f"B_vals={B_vals}")
     print(f"N_vals={N_vals}\n")
 
-    df = benchmark_grid(B_vals, N_vals, algorithms=args.algorithms, sparsity=args.sparsity)
+    df = benchmark_grid(
+        B_vals, N_vals, algorithms=args.algorithms, sparsity=args.sparsity
+    )
     csv_path = "out/bench_vtnk.csv"
     df.to_csv(csv_path, index=False)
     print(f"\nSaved {csv_path}\n")

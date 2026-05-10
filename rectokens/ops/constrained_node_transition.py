@@ -8,7 +8,6 @@ from rectokens.kernels.constrained_node_transition import (
 from rectokens.schemas.state import ConstraintState
 
 
-
 def fused_linear_constrained_node_transition(
     a: torch.Tensor,
     b: torch.Tensor,

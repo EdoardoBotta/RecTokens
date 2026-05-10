@@ -95,7 +95,9 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity):
                         )
                     )
                 if "sparse_pytorch_sample" in alg_set:
-                    record["ms_sparse_pytorch_sample"] = run_bench(sparse_pytorch_with_sample)
+                    record["ms_sparse_pytorch_sample"] = run_bench(
+                        sparse_pytorch_with_sample
+                    )
 
             if "fused_sample" in alg_set and "sparse_pytorch_sample" in alg_set:
                 record["speedup_fused_vs_sparse_pytorch_sample"] = (
@@ -157,7 +159,9 @@ if __name__ == "__main__":
     print(f"B_vals={B_vals}")
     print(f"N_vals={N_vals}\n")
 
-    df = benchmark_grid(B_vals, N_vals, algorithms=args.algorithms, sparsity=args.sparsity)
+    df = benchmark_grid(
+        B_vals, N_vals, algorithms=args.algorithms, sparsity=args.sparsity
+    )
     csv_path = "out/bench_fused_sample.csv"
     df.to_csv(csv_path, index=False)
     print(f"\nSaved {csv_path}\n")

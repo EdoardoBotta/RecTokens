@@ -156,19 +156,23 @@ def _constrained_node_transition_kernel(
             child_valid = b_valid_store & (n_children > k)
             col_k = tl.load(
                 csr_trie_cols_vals_ptr + csr_row_ptrs + k,
-                mask=child_valid, other=-1,
+                mask=child_valid,
+                other=-1,
             )
             val_k = tl.load(
                 csr_trie_cols_vals_ptr + csr_row_ptrs + k + cols_vals_stride_0,
-                mask=child_valid, other=-1,
+                mask=child_valid,
+                other=-1,
             )
             tl.store(
                 next_node_ptr + offs_B * next_node_stride_B + k * next_node_stride_N,
-                val_k, mask=b_valid_store,
+                val_k,
+                mask=b_valid_store,
             )
             tl.store(
                 valid_idxs_ptr + offs_B * valid_idxs_stride_B + k * valid_idxs_stride_N,
-                col_k, mask=b_valid_store,
+                col_k,
+                mask=b_valid_store,
             )
 
 
@@ -199,7 +203,10 @@ def _fused_linear_constrained_node_transition_op(
     next_node = cur_node.new_full((B, max_branches), -1)
     valid_idxs = cur_node.new_full((B, max_branches), -1)
 
-    grid = lambda meta: (triton.cdiv(B, meta["BLOCK_B"]), triton.cdiv(max_branches, meta["BLOCK_BRANCHES"]))
+    grid = lambda meta: (
+        triton.cdiv(B, meta["BLOCK_B"]),
+        triton.cdiv(max_branches, meta["BLOCK_BRANCHES"]),
+    )
     wrap_triton(_fused_sparse_linear_constrained_node_transition_kernel)[grid](
         a_ptr=a,
         b_ptr=b,
@@ -357,7 +364,13 @@ def _fused_sparse_linear_constrained_node_transition_kernel(
 
 @triton.jit
 def _gumbel_max_update(
-    rng_seed, offs_B, logit_k, col_k, child_mask, sample, max_logits,
+    rng_seed,
+    offs_B,
+    logit_k,
+    col_k,
+    child_mask,
+    sample,
+    max_logits,
     branch_idx,
     max_branches,
 ):
@@ -380,10 +393,14 @@ def _gumbel_max_update(
     gumbel = -tl.log(-tl.log(u + 1e-10) + 1e-10)
     g_k = tl.where(child_mask, logit_k + gumbel, float("-inf"))
     improved_max = g_k > max_logits
-    return tl.where(improved_max, col_k, sample), tl.where(improved_max, g_k, max_logits)
+    return tl.where(improved_max, col_k, sample), tl.where(
+        improved_max, g_k, max_logits
+    )
 
 
-@triton_op("vtnk::_fused_linear_constrained_node_transition_sampling_op", mutates_args={})
+@triton_op(
+    "vtnk::_fused_linear_constrained_node_transition_sampling_op", mutates_args={}
+)
 def _fused_linear_constrained_node_transition_sampling_op(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -406,14 +423,18 @@ def _fused_linear_constrained_node_transition_sampling_op(
     B, K = a.shape
     N = b.shape[1]
 
-    assert cur_node.shape == (B,), f"Expected cur_node shape ({B},), got {cur_node.shape}"
+    assert cur_node.shape == (B,), (
+        f"Expected cur_node shape ({B},), got {cur_node.shape}"
+    )
 
     a = a.contiguous()
     cur_node = cur_node.contiguous()
     csr_cols_vals = csr_cols_vals.contiguous()
     bias_val = bias_val.contiguous()
 
-    corrected_logits = torch.full((B, N), float("-inf"), dtype=torch.float32, device=a.device)
+    corrected_logits = torch.full(
+        (B, N), float("-inf"), dtype=torch.float32, device=a.device
+    )
     next_node = cur_node.new_full((B, max_branches), -1)
     valid_idxs = cur_node.new_full((B, max_branches), -1)
     sample = torch.full((B,), -1.0, dtype=torch.float32, device=a.device)
@@ -421,7 +442,10 @@ def _fused_linear_constrained_node_transition_sampling_op(
     num_locks = triton.cdiv(B, 16)
     locks = torch.zeros(num_locks, dtype=torch.int32, device=a.device)
 
-    grid = lambda meta: (triton.cdiv(B, meta["BLOCK_B"]), triton.cdiv(max_branches, meta["BLOCK_BRANCHES"]))
+    grid = lambda meta: (
+        triton.cdiv(B, meta["BLOCK_B"]),
+        triton.cdiv(max_branches, meta["BLOCK_BRANCHES"]),
+    )
     wrap_triton(_fused_sparse_linear_constrained_node_transition_sampling_kernel)[grid](
         a_ptr=a,
         b_ptr=b,
@@ -469,24 +493,54 @@ def _fused_linear_constrained_node_transition_sampling_op(
         triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
     ],
     key=["B", "K", "N"],
-    restore_value=["corrected_logits_ptr", "next_node_ptr", "valid_idxs_ptr", "sample_ptr", "gumbel_max_ptr", "locks_ptr"],
+    restore_value=[
+        "corrected_logits_ptr",
+        "next_node_ptr",
+        "valid_idxs_ptr",
+        "sample_ptr",
+        "gumbel_max_ptr",
+        "locks_ptr",
+    ],
 )
 @triton.jit
 def _fused_sparse_linear_constrained_node_transition_sampling_kernel(
     # Inputs
-    a_ptr, b_ptr, bias_ptr, cur_node_ptr, csr_trie_row_ptr, csr_trie_cols_vals_ptr, temperature_ptr,
-    gumbel_max_ptr, locks_ptr, num_locks,
-    a_stride_B, a_stride_K, b_stride_K, b_stride_N, cols_vals_stride_0,
+    a_ptr,
+    b_ptr,
+    bias_ptr,
+    cur_node_ptr,
+    csr_trie_row_ptr,
+    csr_trie_cols_vals_ptr,
+    temperature_ptr,
+    gumbel_max_ptr,
+    locks_ptr,
+    num_locks,
+    a_stride_B,
+    a_stride_K,
+    b_stride_K,
+    b_stride_N,
+    cols_vals_stride_0,
     # Outputs (corrected_logits pre-filled with -inf; kernel only writes valid positions)
-    corrected_logits_ptr, next_node_ptr, valid_idxs_ptr, sample_ptr,
-    corrected_logits_stride_B, corrected_logits_stride_N,
-    next_node_stride_B, next_node_stride_N,
-    valid_idxs_stride_B, valid_idxs_stride_N,
+    corrected_logits_ptr,
+    next_node_ptr,
+    valid_idxs_ptr,
+    sample_ptr,
+    corrected_logits_stride_B,
+    corrected_logits_stride_N,
+    next_node_stride_B,
+    next_node_stride_N,
+    valid_idxs_stride_B,
+    valid_idxs_stride_N,
     rng_seed,
     # Constants
-    B: tl.constexpr, K: tl.constexpr, N: tl.constexpr,
-    BLOCK_B: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_BRANCHES: tl.constexpr,
-    max_branches, HAS_BIAS: tl.constexpr,
+    B: tl.constexpr,
+    K: tl.constexpr,
+    N: tl.constexpr,
+    BLOCK_B: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_BRANCHES: tl.constexpr,
+    max_branches,
+    HAS_BIAS: tl.constexpr,
 ):
     """
     Sparse fused kernel with Gumbel-max sampling.
@@ -503,7 +557,9 @@ def _fused_sparse_linear_constrained_node_transition_sampling_kernel(
 
     cur_node = tl.load(cur_node_ptr + offs_B, mask=b_mask, other=-1)
     csr_row_ptrs = tl.load(csr_trie_row_ptr + cur_node, mask=cur_node >= 0, other=0)
-    csr_next_ptrs = tl.load(csr_trie_row_ptr + cur_node + 1, mask=cur_node >= 0, other=0)
+    csr_next_ptrs = tl.load(
+        csr_trie_row_ptr + cur_node + 1, mask=cur_node >= 0, other=0
+    )
     n_children = csr_next_ptrs - csr_row_ptrs
 
     temperature = tl.load(temperature_ptr)
@@ -518,11 +574,13 @@ def _fused_sparse_linear_constrained_node_transition_sampling_kernel(
 
         col_k = tl.load(
             csr_trie_cols_vals_ptr + csr_row_ptrs + branch_idx,
-            mask=child_mask, other=-1,
+            mask=child_mask,
+            other=-1,
         )
         val_k = tl.load(
             csr_trie_cols_vals_ptr + csr_row_ptrs + branch_idx + cols_vals_stride_0,
-            mask=child_mask, other=-1,
+            mask=child_mask,
+            other=-1,
         )
 
         logit_k = tl.zeros((BLOCK_B,), dtype=tl.float32)
@@ -532,23 +590,34 @@ def _fused_sparse_linear_constrained_node_transition_sampling_kernel(
             a_ptrs = a_ptr + offs_B[:, None] * a_stride_B + offs_K[None, :] * a_stride_K
             a_chunk = tl.load(a_ptrs, mask=b_mask[:, None] & k_mask[None, :], other=0.0)
             b_ptrs = b_ptr + offs_K[None, :] * b_stride_K + col_k[:, None] * b_stride_N
-            b_chunk = tl.load(b_ptrs, mask=child_mask[:, None] & k_mask[None, :], other=0.0)
+            b_chunk = tl.load(
+                b_ptrs, mask=child_mask[:, None] & k_mask[None, :], other=0.0
+            )
             logit_k += tl.sum(a_chunk * b_chunk, axis=1)
 
         if HAS_BIAS:
             logit_k += tl.load(bias_ptr + col_k, mask=child_mask, other=0.0)
 
         tl.store(
-            corrected_logits_ptr + offs_B * corrected_logits_stride_B + col_k * corrected_logits_stride_N,
-            logit_k, mask=child_mask,
+            corrected_logits_ptr
+            + offs_B * corrected_logits_stride_B
+            + col_k * corrected_logits_stride_N,
+            logit_k,
+            mask=child_mask,
         )
         tl.store(
-            next_node_ptr + offs_B * next_node_stride_B + branch_idx * next_node_stride_N,
-            val_k, mask=b_mask & in_range,
+            next_node_ptr
+            + offs_B * next_node_stride_B
+            + branch_idx * next_node_stride_N,
+            val_k,
+            mask=b_mask & in_range,
         )
         tl.store(
-            valid_idxs_ptr + offs_B * valid_idxs_stride_B + branch_idx * valid_idxs_stride_N,
-            col_k, mask=b_mask & in_range,
+            valid_idxs_ptr
+            + offs_B * valid_idxs_stride_B
+            + branch_idx * valid_idxs_stride_N,
+            col_k,
+            mask=b_mask & in_range,
         )
 
         u = tl.rand(seed=rng_seed, offset=offs_B * max_branches + branch_idx)
@@ -567,9 +636,17 @@ def _fused_sparse_linear_constrained_node_transition_sampling_kernel(
 
     cur_max = tl.load(gumbel_max_ptr + offs_B, mask=b_mask, other=float("-inf"))
     improved_global = block_max_gumbel > cur_max
-    tl.store(gumbel_max_ptr + offs_B, tl.where(improved_global, block_max_gumbel, cur_max), mask=b_mask)
+    tl.store(
+        gumbel_max_ptr + offs_B,
+        tl.where(improved_global, block_max_gumbel, cur_max),
+        mask=b_mask,
+    )
     cur_sample = tl.load(sample_ptr + offs_B, mask=b_mask, other=-1.0)
-    tl.store(sample_ptr + offs_B, tl.where(improved_global, block_sample, cur_sample), mask=b_mask)
+    tl.store(
+        sample_ptr + offs_B,
+        tl.where(improved_global, block_sample, cur_sample),
+        mask=b_mask,
+    )
 
     tl.debug_barrier()
     tl.atomic_xchg(lock_ptr, 0)

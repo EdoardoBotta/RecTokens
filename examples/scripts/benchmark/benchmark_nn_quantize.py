@@ -69,11 +69,17 @@ def benchmark_grid(B_vals, D_vals, algorithms):
 
             with torch.no_grad():
                 if "quantize_fwd" in alg_set:
-                    record["ms_quantize_fwd"] = run_bench(lambda: quantize_fwd(x, codebook))
+                    record["ms_quantize_fwd"] = run_bench(
+                        lambda: quantize_fwd(x, codebook)
+                    )
                 if "quantize_fwd_mm" in alg_set:
-                    record["ms_quantize_fwd_mm"] = run_bench(lambda: quantize_fwd_mm(x, codebook))
+                    record["ms_quantize_fwd_mm"] = run_bench(
+                        lambda: quantize_fwd_mm(x, codebook)
+                    )
                 if "cdist_compiled" in alg_set:
-                    record["ms_cdist_compiled"] = run_bench(lambda: cdist_nn_compiled(x, codebook))
+                    record["ms_cdist_compiled"] = run_bench(
+                        lambda: cdist_nn_compiled(x, codebook)
+                    )
                 if "faiss_search" in alg_set:
                     record["ms_faiss_search"] = run_bench(
                         lambda: gpu_index.search(x.contiguous(), 1),
@@ -81,15 +87,25 @@ def benchmark_grid(B_vals, D_vals, algorithms):
                     )
 
             if "quantize_fwd" in alg_set and "quantize_fwd_mm" in alg_set:
-                record["speedup_fwd_vs_mm"] = record["ms_quantize_fwd_mm"] / record["ms_quantize_fwd"]
+                record["speedup_fwd_vs_mm"] = (
+                    record["ms_quantize_fwd_mm"] / record["ms_quantize_fwd"]
+                )
             if "quantize_fwd" in alg_set and "cdist_compiled" in alg_set:
-                record["speedup_fwd_vs_cdist"] = record["ms_cdist_compiled"] / record["ms_quantize_fwd"]
+                record["speedup_fwd_vs_cdist"] = (
+                    record["ms_cdist_compiled"] / record["ms_quantize_fwd"]
+                )
             if "quantize_fwd_mm" in alg_set and "cdist_compiled" in alg_set:
-                record["speedup_mm_vs_cdist"] = record["ms_cdist_compiled"] / record["ms_quantize_fwd_mm"]
+                record["speedup_mm_vs_cdist"] = (
+                    record["ms_cdist_compiled"] / record["ms_quantize_fwd_mm"]
+                )
             if "quantize_fwd" in alg_set and "faiss_search" in alg_set:
-                record["speedup_fwd_vs_faiss"] = record["ms_faiss_search"] / record["ms_quantize_fwd"]
+                record["speedup_fwd_vs_faiss"] = (
+                    record["ms_faiss_search"] / record["ms_quantize_fwd"]
+                )
             if "quantize_fwd_mm" in alg_set and "faiss_search" in alg_set:
-                record["speedup_mm_vs_faiss"] = record["ms_faiss_search"] / record["ms_quantize_fwd_mm"]
+                record["speedup_mm_vs_faiss"] = (
+                    record["ms_faiss_search"] / record["ms_quantize_fwd_mm"]
+                )
 
             records.append(record)
 

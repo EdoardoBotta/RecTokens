@@ -108,8 +108,7 @@ def print_comparison_row(
         )
     else:
         print(
-            f"    {metric:<8} {val_a:>10}  {val_b:>10}  "
-            f"Δ={diff:+d} ({pct:+.1f}%){flag}"
+            f"    {metric:<8} {val_a:>10}  {val_b:>10}  Δ={diff:+d} ({pct:+.1f}%){flag}"
         )
 
 
@@ -123,7 +122,9 @@ def side_by_side(label_a: str, stats_a: dict, label_b: str, stats_b: dict) -> No
         if isinstance(va, int):
             diff = vb - va
             pct = (diff / va * 100) if va != 0 else float("nan")
-            print(f"  {metric:<8} {va:>{col_w},}  {vb:>{col_w},}  Δ={diff:+,} ({pct:+.1f}%)")
+            print(
+                f"  {metric:<8} {va:>{col_w},}  {vb:>{col_w},}  Δ={diff:+,} ({pct:+.1f}%)"
+            )
         else:
             diff = vb - va
             pct = (diff / va * 100) if va != 0 else float("nan")
@@ -211,7 +212,9 @@ def main() -> None:
 
     for split in ("train", "eval"):
         if split not in ft or split not in sa:
-            print(f"\n  [{split}] Cannot compare — data missing for one or both configs.")
+            print(
+                f"\n  [{split}] Cannot compare — data missing for one or both configs."
+            )
             continue
         print(f"\n  SPLIT: {split}")
         side_by_side(
