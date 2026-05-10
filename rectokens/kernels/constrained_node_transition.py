@@ -66,7 +66,7 @@ def _constrained_node_transition_op(
         triton.Config({"BLOCK_B": 128, "BLOCK_N": 64, "GROUP_SIZE_M": 4}),
         triton.Config({"BLOCK_B": 128, "BLOCK_N": 128, "GROUP_SIZE_M": 8}),
     ],
-    key=["B", "N", "max_branches"],
+    key=["B", "N"],
     restore_value=["corrected_logits_ptr", "next_node_ptr", "valid_idxs_ptr"],
 )
 @triton.jit
@@ -95,7 +95,7 @@ def _constrained_node_transition_kernel(
     BLOCK_B: tl.constexpr,
     BLOCK_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
-    max_branches: tl.constexpr,
+    max_branches,
 ):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(B, BLOCK_B)
@@ -129,7 +129,7 @@ def _constrained_node_transition_kernel(
 
     b_valid = offs_B < B
     logits_correction_mask = tl.zeros([BLOCK_B, BLOCK_N], dtype=tl.int1)
-    for k in tl.static_range(max_branches):
+    for k in range(max_branches):
         col_k = tl.load(
             csr_trie_cols_vals_ptr + csr_row_ptrs + k,
             mask=b_valid & (n_children > k),
@@ -148,29 +148,25 @@ def _constrained_node_transition_kernel(
     )
 
     if pid_N == 0:
-        slice_range = tl.arange(0, max_branches)
-        offs_cols_vals = csr_row_ptrs[:, None] + slice_range
-        children_mask = n_children[:, None] > slice_range[None, :]
-        cols = tl.load(
-            csr_trie_cols_vals_ptr + offs_cols_vals, mask=children_mask, other=-1
-        )
-        next_node_vals = tl.load(
-            csr_trie_cols_vals_ptr + offs_cols_vals + cols_vals_stride_0,
-            mask=children_mask,
-            other=-1,
-        )
-        next_node_ptrs = (
-            next_node_ptr
-            + offs_B[:, None] * next_node_stride_B
-            + tl.arange(0, max_branches) * next_node_stride_N
-        )
-        valid_idxs_ptrs = (
-            valid_idxs_ptr
-            + offs_B[:, None] * valid_idxs_stride_B
-            + tl.arange(0, max_branches) * valid_idxs_stride_N
-        )
-        tl.store(next_node_ptrs, next_node_vals, mask=offs_B[:, None] < B)
-        tl.store(valid_idxs_ptrs, cols, mask=offs_B[:, None] < B)
+        b_valid_store = offs_B < B
+        for k in range(max_branches):
+            child_valid = b_valid_store & (n_children > k)
+            col_k = tl.load(
+                csr_trie_cols_vals_ptr + csr_row_ptrs + k,
+                mask=child_valid, other=-1,
+            )
+            val_k = tl.load(
+                csr_trie_cols_vals_ptr + csr_row_ptrs + k + cols_vals_stride_0,
+                mask=child_valid, other=-1,
+            )
+            tl.store(
+                next_node_ptr + offs_B * next_node_stride_B + k * next_node_stride_N,
+                val_k, mask=b_valid_store,
+            )
+            tl.store(
+                valid_idxs_ptr + offs_B * valid_idxs_stride_B + k * valid_idxs_stride_N,
+                col_k, mask=b_valid_store,
+            )
 
 
 @triton_op("vtnk::_fused_linear_constrained_node_transition_op", mutates_args={})
@@ -240,7 +236,7 @@ def _fused_linear_constrained_node_transition_op(
         triton.Config({"BLOCK_B": 64, "BLOCK_K": 128}),
         triton.Config({"BLOCK_B": 128, "BLOCK_K": 128}),
     ],
-    key=["B", "K", "N", "max_branches"],
+    key=["B", "K", "N"],
     restore_value=["corrected_logits_ptr", "next_node_ptr", "valid_idxs_ptr"],
 )
 @triton.jit
@@ -273,7 +269,7 @@ def _fused_sparse_linear_constrained_node_transition_kernel(
     N: tl.constexpr,
     BLOCK_B: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    max_branches: tl.constexpr,
+    max_branches,
     HAS_BIAS: tl.constexpr,
 ):
     """
@@ -298,7 +294,7 @@ def _fused_sparse_linear_constrained_node_transition_kernel(
     )
     n_children = csr_next_ptrs - csr_row_ptrs
 
-    for branch_idx in tl.static_range(max_branches):
+    for branch_idx in range(max_branches):
         child_mask = b_mask & (n_children > branch_idx)
 
         col_k = tl.load(

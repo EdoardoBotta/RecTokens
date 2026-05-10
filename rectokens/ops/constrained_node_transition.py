@@ -1,5 +1,3 @@
-import math
-
 import torch
 
 from rectokens.kernels.constrained_node_transition import (
@@ -8,10 +6,6 @@ from rectokens.kernels.constrained_node_transition import (
 )
 from rectokens.schemas.state import ConstraintState
 
-
-def _ceil_pow2(n: int) -> int:
-    """Round n up to the nearest power of 2 (minimum 1)."""
-    return 1 if n <= 1 else 2 ** math.ceil(math.log2(n))
 
 
 def fused_linear_constrained_node_transition(
@@ -35,7 +29,7 @@ def fused_linear_constrained_node_transition(
     # Use a dummy bias tensor when none is provided; has_bias gates all loads.
     bias_val = bias if bias is not None else a.new_empty(0)
     step = constraint_state.step
-    max_branches = _ceil_pow2(constraint_state.trie.layer_max_branches[step])
+    max_branches = constraint_state.trie.layer_max_branches[step]
     return _fused_linear_constrained_node_transition_op(
         a,
         b,
@@ -61,7 +55,7 @@ def constrained_node_transition(
       corrected_logits: (B, vocab_size)  float  — logits zeroed for invalid tokens
     """
     step, trie = constraint_state.step, constraint_state.trie
-    max_branches = _ceil_pow2(trie.layer_max_branches[step])
+    max_branches = trie.layer_max_branches[step]
     return _constrained_node_transition_op(
         logits,
         constraint_state.cur_node,

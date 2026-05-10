@@ -7,6 +7,7 @@ Benchmark: fused_linear_constrained_node_transition
 Grid: B (batch size) × N (vocab / logits size). K (hidden dim) fixed.
 """
 
+import argparse
 import os
 import time
 import torch
@@ -30,6 +31,8 @@ K = 512
 MAX_BRANCHES = 16
 WARMUP = 25
 REP = 100
+
+ALL_ALGORITHMS = ["fused", "kernel", "pytorch", "sparse_pytorch", "trie_cpu"]
 
 
 def lex_sort(rows: list[list[int]]) -> torch.Tensor:
@@ -93,76 +96,83 @@ def run_bench_cpu(fn, warmup: int = WARMUP, rep: int = REP) -> float:
     return float(sum(times[: max(1, rep // 2)]) / max(1, rep // 2))
 
 
-def benchmark_grid(B_vals, N_vals):
+def benchmark_grid(B_vals, N_vals, algorithms):
+    alg_set = set(algorithms)
+    gpu_algos = alg_set & {"fused", "kernel", "pytorch", "sparse_pytorch"}
     records = []
 
     for B in B_vals:
         for N in N_vals:
             print(f"  B={B:6d}  N={N:6d}")
 
-            csr = make_csr(vocab_size=N, max_branches=MAX_BRANCHES)
-            _, trie_nodes = make_trie(max_branches=MAX_BRANCHES)
+            if gpu_algos:
+                csr = make_csr(vocab_size=N, max_branches=MAX_BRANCHES)
+            if "trie_cpu" in alg_set:
+                _, trie_nodes = make_trie(max_branches=MAX_BRANCHES)
 
-            # Inputs
             a = torch.randn(B, K, device=DEVICE)
-            weight = torch.randn(
-                N, K, device=DEVICE
-            )  # nn.Linear weight shape (out, in)
+            weight = torch.randn(N, K, device=DEVICE)
             cur_node = torch.zeros(B, dtype=torch.long, device=DEVICE)
-            cur_node_cpu = cur_node.cpu()
+            if "trie_cpu" in alg_set:
+                cur_node_cpu = cur_node.cpu()
 
-            # compiled linear (shared across fn2 and fn3)
-            linear = torch.compile(nn.Linear(K, N, bias=False).to(DEVICE))
-            with torch.no_grad():
-                linear.weight.data.copy_(weight)
+            if "pytorch" in alg_set:
+                linear = torch.compile(nn.Linear(K, N, bias=False).to(DEVICE))
+                with torch.no_grad():
+                    linear.weight.data.copy_(weight)
 
-            sparse_linear_pytorch_compiled = torch.compile(sparse_linear_pytorch)
-            cs = ConstraintState(step=0, trie=csr, cur_node=cur_node)
+            if "sparse_pytorch" in alg_set:
+                sparse_linear_pytorch_compiled = torch.compile(sparse_linear_pytorch)
+
+            if gpu_algos:
+                cs = ConstraintState(step=0, trie=csr, cur_node=cur_node)
 
             # --- warmup / force compilation ---
             with torch.no_grad():
-                fused_linear_constrained_node_transition(a, weight.T, cs)
-                logits_w = a @ weight.T
-                constrained_node_transition(logits_w, cs)
-                vtnk_pytorch(logits_w, cur_node, csr, step=0)
-                linear(a)
-                sparse_linear_pytorch_compiled(a, weight, cur_node, csr, step=0)
+                if "fused" in alg_set:
+                    fused_linear_constrained_node_transition(a, weight.T, cs)
+                if "kernel" in alg_set:
+                    constrained_node_transition(a @ weight.T, cs)
+                if "pytorch" in alg_set:
+                    vtnk_pytorch(linear(a), cur_node, csr, step=0)
+                if "sparse_pytorch" in alg_set:
+                    sparse_linear_pytorch_compiled(a, weight, cur_node, csr, step=0)
+
+            record = {"B": B, "N": N}
 
             # --- benchmark ---
             with torch.no_grad():
-                ms_fused = run_bench(
-                    lambda: fused_linear_constrained_node_transition(a, weight.T, cs)
-                )
-                ms_kernel = run_bench(
-                    lambda: constrained_node_transition(a @ weight.T, cs)
-                )
-                ms_pytorch = run_bench(
-                    lambda: vtnk_pytorch(linear(a), cur_node, csr, step=0)
-                )
-                ms_sparse_pytorch = run_bench(
-                    lambda: sparse_linear_pytorch_compiled(
-                        a, weight, cur_node, csr, step=0
+                if "fused" in alg_set:
+                    record["ms_fused"] = run_bench(
+                        lambda: fused_linear_constrained_node_transition(a, weight.T, cs)
                     )
+                if "kernel" in alg_set:
+                    record["ms_kernel"] = run_bench(
+                        lambda: constrained_node_transition(a @ weight.T, cs)
+                    )
+                if "pytorch" in alg_set:
+                    record["ms_pytorch"] = run_bench(
+                        lambda: vtnk_pytorch(linear(a), cur_node, csr, step=0)
+                    )
+                if "sparse_pytorch" in alg_set:
+                    record["ms_sparse_pytorch"] = run_bench(
+                        lambda: sparse_linear_pytorch_compiled(a, weight, cur_node, csr, step=0)
+                    )
+            if "trie_cpu" in alg_set:
+                record["ms_trie_cpu"] = run_bench_cpu(
+                    lambda: trie_cpu_traversal(cur_node_cpu, trie_nodes, N)
                 )
-            ms_trie_cpu = run_bench_cpu(
-                lambda: trie_cpu_traversal(cur_node_cpu, trie_nodes, N)
-            )
 
-            records.append(
-                {
-                    "B": B,
-                    "N": N,
-                    "ms_fused": ms_fused,
-                    "ms_kernel": ms_kernel,
-                    "ms_pytorch": ms_pytorch,
-                    "ms_sparse_pytorch": ms_sparse_pytorch,
-                    "ms_trie_cpu": ms_trie_cpu,
-                    "speedup_fused_vs_kernel": ms_kernel / ms_fused,
-                    "speedup_fused_vs_pytorch": ms_pytorch / ms_fused,
-                    "speedup_fused_vs_sparse_pytorch": ms_sparse_pytorch / ms_fused,
-                    "speedup_fused_vs_trie_cpu": ms_trie_cpu / ms_fused,
-                }
-            )
+            if "fused" in alg_set and "kernel" in alg_set:
+                record["speedup_fused_vs_kernel"] = record["ms_kernel"] / record["ms_fused"]
+            if "fused" in alg_set and "pytorch" in alg_set:
+                record["speedup_fused_vs_pytorch"] = record["ms_pytorch"] / record["ms_fused"]
+            if "fused" in alg_set and "sparse_pytorch" in alg_set:
+                record["speedup_fused_vs_sparse_pytorch"] = record["ms_sparse_pytorch"] / record["ms_fused"]
+            if "fused" in alg_set and "trie_cpu" in alg_set:
+                record["speedup_fused_vs_trie_cpu"] = record["ms_trie_cpu"] / record["ms_fused"]
+
+            records.append(record)
 
     return pd.DataFrame(records)
 
@@ -189,6 +199,19 @@ def plot_heatmap(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Benchmark constrained node transition algorithms."
+    )
+    parser.add_argument(
+        "--algorithms",
+        nargs="+",
+        choices=ALL_ALGORITHMS,
+        default=ALL_ALGORITHMS,
+        metavar="ALGO",
+        help=f"Algorithms to benchmark. Choices: {ALL_ALGORITHMS} (default: all)",
+    )
+    args = parser.parse_args()
+
     assert torch.cuda.is_available(), "CUDA required"
     os.makedirs("out", exist_ok=True)
 
@@ -196,57 +219,46 @@ if __name__ == "__main__":
     N_vals = [512, 1024, 8192, 150000]
 
     print(f"Benchmarking K={K}, max_branches={MAX_BRANCHES}")
+    print(f"Algorithms: {args.algorithms}")
     print(f"B_vals={B_vals}")
     print(f"N_vals={N_vals}\n")
 
-    df = benchmark_grid(B_vals, N_vals)
+    df = benchmark_grid(B_vals, N_vals, algorithms=args.algorithms)
     csv_path = "out/bench_vtnk.csv"
     df.to_csv(csv_path, index=False)
     print(f"\nSaved {csv_path}\n")
 
-    print(
-        df[
-            [
-                "B",
-                "N",
-                "ms_fused",
-                "ms_kernel",
-                "ms_pytorch",
-                "ms_sparse_pytorch",
-                "ms_trie_cpu",
-                "speedup_fused_vs_kernel",
-                "speedup_fused_vs_pytorch",
-                "speedup_fused_vs_sparse_pytorch",
-                "speedup_fused_vs_trie_cpu",
-            ]
-        ].to_string(index=False)
-    )
+    print(df.to_string(index=False))
 
-    plot_heatmap(
-        df,
-        value_col="speedup_fused_vs_kernel",
-        title=f"Fused speedup vs compiled_linear+constrained_kernel  (K={K})",
-        filename="out/heatmap_fused_vs_kernel.jpg",
-        cbar_label="Speedup (>1 = fused faster)",
-    )
-    plot_heatmap(
-        df,
-        value_col="speedup_fused_vs_pytorch",
-        title=f"Fused speedup vs compiled_linear+vtnk_pytorch  (K={K})",
-        filename="out/heatmap_fused_vs_pytorch.jpg",
-        cbar_label="Speedup (>1 = fused faster)",
-    )
-    plot_heatmap(
-        df,
-        value_col="speedup_fused_vs_sparse_pytorch",
-        title=f"Fused speedup vs sparse_linear_pytorch  (K={K})",
-        filename="out/heatmap_fused_vs_sparse_pytorch.jpg",
-        cbar_label="Speedup (>1 = fused faster)",
-    )
-    plot_heatmap(
-        df,
-        value_col="speedup_fused_vs_trie_cpu",
-        title=f"Fused speedup vs CPU trie traversal  (K={K})",
-        filename="out/heatmap_fused_vs_trie_cpu.jpg",
-        cbar_label="Speedup (>1 = fused faster)",
-    )
+    if "speedup_fused_vs_kernel" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_fused_vs_kernel",
+            title=f"Fused speedup vs compiled_linear+constrained_kernel  (K={K})",
+            filename="out/heatmap_fused_vs_kernel.jpg",
+            cbar_label="Speedup (>1 = fused faster)",
+        )
+    if "speedup_fused_vs_pytorch" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_fused_vs_pytorch",
+            title=f"Fused speedup vs compiled_linear+vtnk_pytorch  (K={K})",
+            filename="out/heatmap_fused_vs_pytorch.jpg",
+            cbar_label="Speedup (>1 = fused faster)",
+        )
+    if "speedup_fused_vs_sparse_pytorch" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_fused_vs_sparse_pytorch",
+            title=f"Fused speedup vs sparse_linear_pytorch  (K={K})",
+            filename="out/heatmap_fused_vs_sparse_pytorch.jpg",
+            cbar_label="Speedup (>1 = fused faster)",
+        )
+    if "speedup_fused_vs_trie_cpu" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_fused_vs_trie_cpu",
+            title=f"Fused speedup vs CPU trie traversal  (K={K})",
+            filename="out/heatmap_fused_vs_trie_cpu.jpg",
+            cbar_label="Speedup (>1 = fused faster)",
+        )
