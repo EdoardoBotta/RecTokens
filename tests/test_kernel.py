@@ -12,6 +12,7 @@ from rectokens.decoding.vntk import vtnk_pytorch
 from rectokens.ops.constrained_node_transition import (
     constrained_node_transition,
     fused_linear_constrained_node_transition,
+    fused_linear_constrained_node_transition_topk,
 )
 from rectokens.schemas.state import ConstraintState
 
@@ -202,3 +203,64 @@ class TestKernel(unittest.TestCase):
 
     def test_fused_linear_b8_large_k(self) -> None:
         self._assert_fused_linear(8, 128, 0, [0] * 8)
+
+    # ---------------------------------------------------------------------------
+    # fused_linear_constrained_node_transition_topk — matches torch.topk reference
+    # ---------------------------------------------------------------------------
+
+    def _assert_fused_topk(
+        self, B: int, K: int, step: int, cur_node_vals: list[int], k: int
+    ) -> None:
+        torch.manual_seed(99)
+        a = torch.randn(B, K, device=DEVICE)
+        b = torch.randn(K, VOCAB_SIZE, device=DEVICE)
+        cur_node = torch.tensor(cur_node_vals, device=DEVICE)
+        ref_logits = (a @ b).float()
+        _, _, ref_cl = vtnk_pytorch(ref_logits, cur_node, self.csr_small, step)
+        # Reference top-k: use constrained logits; -inf positions are excluded naturally.
+        ref_topk_vals, ref_topk_idxs_raw = torch.topk(ref_cl, k, dim=-1)
+        # torch.topk returns arbitrary indices for -inf positions; normalize to -1
+        # to match the kernel's convention (unfilled slots stay -1).
+        ref_topk_idxs = torch.where(
+            ref_topk_vals > float("-inf"),
+            ref_topk_idxs_raw,
+            torch.full_like(ref_topk_idxs_raw, -1),
+        )
+        constraint_state = ConstraintState(
+            step=step, trie=self.csr_small, cur_node=cur_node
+        )
+        ker_nn, ker_vi, ker_topk_l, ker_topk_i = fused_linear_constrained_node_transition_topk(
+            a, b, constraint_state, k
+        )
+        # Sort both along k-dim to handle tie-breaking differences.
+        assert torch.allclose(
+            ker_topk_l.sort(dim=-1).values,
+            ref_topk_vals.sort(dim=-1).values,
+            atol=1e-2,
+            equal_nan=True,
+        ), f"topk logits mismatch\nkernel: {ker_topk_l}\nref:    {ref_topk_vals}"
+        assert torch.equal(
+            ker_topk_i.sort(dim=-1).values,
+            ref_topk_idxs.sort(dim=-1).values,
+        ), f"topk idxs mismatch\nkernel: {ker_topk_i}\nref:    {ref_topk_idxs}"
+
+    def test_fused_topk_k1_b1_step0(self) -> None:
+        self._assert_fused_topk(1, 16, 0, [0], k=1)
+
+    def test_fused_topk_k1_b2_step1(self) -> None:
+        self._assert_fused_topk(2, 16, 1, [1, 2], k=1)
+
+    def test_fused_topk_k2_b1_step0(self) -> None:
+        self._assert_fused_topk(1, 16, 0, [0], k=2)
+
+    def test_fused_topk_k2_b2_step1(self) -> None:
+        self._assert_fused_topk(2, 16, 1, [1, 2], k=2)
+
+    def test_fused_topk_k1_b3_step2(self) -> None:
+        self._assert_fused_topk(3, 16, 2, [3, 4, 3], k=1)
+
+    def test_fused_topk_k2_b3_step2(self) -> None:
+        self._assert_fused_topk(3, 16, 2, [3, 4, 3], k=2)
+
+    def test_fused_topk_k3_b8_large_k(self) -> None:
+        self._assert_fused_topk(8, 128, 0, [0] * 8, k=2)

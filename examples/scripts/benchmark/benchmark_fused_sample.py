@@ -151,7 +151,7 @@ if __name__ == "__main__":
     assert torch.cuda.is_available(), "CUDA required"
     os.makedirs("out", exist_ok=True)
 
-    B_vals = [32, 256, 1024]
+    B_vals = [32, 256, 1024, 4096]
     N_vals = [512, 1024, 8192, 150000]
 
     print(f"Benchmarking K={K}, sparsity={args.sparsity}")

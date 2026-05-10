@@ -636,3 +636,269 @@ def _fused_sparse_linear_constrained_node_transition_sampling_kernel(
 
     tl.debug_barrier()
     tl.atomic_xchg(lock_ptr, 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fused sparse linear + top-K kernel
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@triton.jit
+def _bitonic_compare_swap(val_a, idx_a, val_b, idx_b):
+    """Descending compare-and-swap Triton device function.
+
+    Returns (larger_val, larger_idx, smaller_val, smaller_idx).
+    Inlined by the Triton compiler when called from a @triton.jit kernel.
+    val_a / idx_a and val_b / idx_b are (BLOCK_B,) vectors; the swap is
+    applied element-wise across the batch dimension.
+    """
+    swap = val_a < val_b
+    return (
+        tl.where(swap, val_b, val_a),
+        tl.where(swap, idx_b, idx_a),
+        tl.where(swap, val_a, val_b),
+        tl.where(swap, idx_a, idx_b),
+    )
+
+
+def _bitonic_topk(logits: list, idxs: list, n: int, k: int):
+    """Bitonic sort on n elements (must be a power of 2); return first k descending.
+
+    Plain Python — all loops run at trace time (n and k are Python ints derived
+    from tl.constexpr kernel parameters).  Calls the @triton.jit
+    _bitonic_compare_swap device function, which Triton inlines into the
+    kernel IR.  The result is a flat sequence of tl.where ops with no runtime
+    branching.
+
+    Comparator counts (vs. incremental insertion sort, worst case K_TOP == n):
+      n=4:  5 comparators  vs 16
+      n=8:  19 comparators vs 64
+      n=16: 63 comparators vs 256
+    """
+    step = 2
+    while step <= n:
+        half = step // 2
+        while half >= 1:
+            for i in range(n):
+                j = i ^ half
+                if j > i:
+                    if (i & step) == 0:
+                        # position i gets the larger value (descending sub-sequence)
+                        logits[i], idxs[i], logits[j], idxs[j] = _bitonic_compare_swap(
+                            logits[i], idxs[i], logits[j], idxs[j]
+                        )
+                    else:
+                        # position j gets the larger value (ascending sub-sequence)
+                        logits[j], idxs[j], logits[i], idxs[i] = _bitonic_compare_swap(
+                            logits[j], idxs[j], logits[i], idxs[i]
+                        )
+            half //= 2
+        step *= 2
+    return logits[:k], idxs[:k]
+
+
+@triton_op("vtnk::_fused_linear_constrained_node_transition_topk_op", mutates_args={})
+def _fused_linear_constrained_node_transition_topk_op(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias_val: torch.Tensor,
+    cur_node: torch.Tensor,
+    csr_row_ptrs: torch.Tensor,
+    csr_cols_vals: torch.Tensor,
+    max_branches: int,
+    has_bias: bool,
+    k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    B, K = a.shape
+    N = b.shape[1]
+
+    assert cur_node.shape == (B,), (
+        f"Expected cur_node shape ({B},), got {cur_node.shape}"
+    )
+
+    a = a.contiguous()
+    cur_node = cur_node.contiguous()
+    csr_cols_vals = csr_cols_vals.contiguous()
+    bias_val = bias_val.contiguous()
+
+    corrected_logits = torch.full(
+        (B, N), float("-inf"), dtype=torch.float32, device=a.device
+    )
+    next_node = cur_node.new_full((B, max_branches), -1)
+    valid_idxs = cur_node.new_full((B, max_branches), -1)
+    topk_logits = torch.full((B, k), float("-inf"), dtype=torch.float32, device=a.device)
+    topk_idxs = torch.full((B, k), -1, dtype=torch.int64, device=a.device)
+    num_locks = triton.cdiv(B, 16)
+    locks = torch.zeros(num_locks, dtype=torch.int32, device=a.device)
+
+    grid = lambda meta: (
+        triton.cdiv(B, meta["BLOCK_B"]),
+        triton.cdiv(max_branches, meta["BLOCK_BRANCHES"]),
+    )
+    wrap_triton(_fused_sparse_linear_constrained_node_transition_topk_kernel)[grid](
+        a_ptr=a,
+        b_ptr=b,
+        bias_ptr=bias_val,
+        cur_node_ptr=cur_node,
+        csr_trie_row_ptr=csr_row_ptrs,
+        csr_trie_cols_vals_ptr=csr_cols_vals,
+        locks_ptr=locks,
+        num_locks=num_locks,
+        a_stride_B=a.stride(0),
+        a_stride_K=a.stride(1),
+        b_stride_K=b.stride(0),
+        b_stride_N=b.stride(1),
+        cols_vals_stride_0=csr_cols_vals.stride(0),
+        corrected_logits_ptr=corrected_logits,
+        next_node_ptr=next_node,
+        valid_idxs_ptr=valid_idxs,
+        topk_logits_ptr=topk_logits,
+        topk_idxs_ptr=topk_idxs,
+        corrected_logits_stride_B=corrected_logits.stride(0),
+        corrected_logits_stride_N=corrected_logits.stride(1),
+        next_node_stride_B=next_node.stride(0),
+        next_node_stride_N=next_node.stride(1),
+        valid_idxs_stride_B=valid_idxs.stride(0),
+        valid_idxs_stride_N=valid_idxs.stride(1),
+        B=B,
+        K=K,
+        N=N,
+        K_TOP=k,
+        max_branches=max_branches,
+        HAS_BIAS=has_bias,
+    )
+    return next_node, valid_idxs, topk_logits, topk_idxs
+
+
+@triton.autotune(
+    configs=_FUSED_AUTOTUNE_CONFIGS,
+    key=["B", "K", "N", "K_TOP"],
+    restore_value=[
+        "corrected_logits_ptr",
+        "next_node_ptr",
+        "valid_idxs_ptr",
+        "topk_logits_ptr",
+        "topk_idxs_ptr",
+        "locks_ptr",
+    ],
+)
+@triton.jit
+def _fused_sparse_linear_constrained_node_transition_topk_kernel(
+    # Inputs
+    a_ptr,
+    b_ptr,
+    bias_ptr,
+    cur_node_ptr,
+    csr_trie_row_ptr,
+    csr_trie_cols_vals_ptr,
+    locks_ptr,
+    num_locks,
+    a_stride_B,
+    a_stride_K,
+    b_stride_K,
+    b_stride_N,
+    cols_vals_stride_0,
+    # Outputs (corrected_logits pre-filled with -inf; kernel only writes valid positions)
+    corrected_logits_ptr,
+    next_node_ptr,
+    valid_idxs_ptr,
+    topk_logits_ptr,
+    topk_idxs_ptr,
+    corrected_logits_stride_B,
+    corrected_logits_stride_N,
+    next_node_stride_B,
+    next_node_stride_N,
+    valid_idxs_stride_B,
+    valid_idxs_stride_N,
+    # Constants
+    B: tl.constexpr,
+    K: tl.constexpr,
+    N: tl.constexpr,
+    K_TOP: tl.constexpr,
+    BLOCK_B: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_BRANCHES: tl.constexpr,
+    max_branches,
+    HAS_BIAS: tl.constexpr,
+):
+    """
+    Sparse fused linear + top-K kernel.
+
+    Grid: (ceil(B/BLOCK_B), ceil(max_branches/BLOCK_BRANCHES)).
+
+    For each branch in BLOCK_BRANCHES (unrolled via tl.static_range):
+      1. Compute the sparse logit via _sparse_branch_body (writes corrected_logits,
+         next_node, valid_idxs as a side effect).
+      2. Acquire a per-batch-block spinlock (shared across all pid_BR blocks).
+      3. Insert (logit, col) into the global (B, K_TOP) top-K buffers via insertion
+         sort — each slot is updated with _bitonic_compare_swap, which ensures the
+         larger value stays in the slot and the displaced value propagates forward.
+
+    Note: Triton's AST code generator cannot lower Python list operations (append,
+    indexed assignment) to GPU IR, so the "collect all branches, then sort once"
+    pattern is not usable here.  The per-branch spinlock design avoids register
+    arrays and remains correct: O(BLOCK_BRANCHES * K_TOP) store ops per block.
+    """
+    pid_B = tl.program_id(axis=0)
+    pid_BR = tl.program_id(axis=1)
+
+    offs_B = pid_B * BLOCK_B + tl.arange(0, BLOCK_B)
+    b_mask = offs_B < B
+
+    cur_node = tl.load(cur_node_ptr + offs_B, mask=b_mask, other=-1)
+    csr_row_ptrs = tl.load(csr_trie_row_ptr + cur_node, mask=cur_node >= 0, other=0)
+    csr_next_ptrs = tl.load(
+        csr_trie_row_ptr + cur_node + 1, mask=cur_node >= 0, other=0
+    )
+    n_children = csr_next_ptrs - csr_row_ptrs
+
+    # Spinlock pointer for this batch block — shared across all pid_BR blocks.
+    lock_ptr = locks_ptr + pid_B // tl.cdiv(B, BLOCK_B * num_locks)
+
+    # Per-branch processing: for each branch, compute the logit, then acquire the
+    # spinlock once and insert into the global top-K buffer via insertion sort.
+    # Using _bitonic_compare_swap (a @triton.jit device function) for each slot
+    # keeps the logic compact: each call ensures the slot retains the larger value
+    # and the displaced value propagates to the next slot.
+    # Triton does not support Python list operations (e.g., list.append) inside
+    # @triton.jit kernels — the AST code generator cannot lower them to IR.  The
+    # per-branch spinlock pattern avoids needing register arrays entirely.
+    for local_br in tl.static_range(BLOCK_BRANCHES):
+        branch_idx = pid_BR * BLOCK_BRANCHES + local_br
+        col_k, logit_k, child_mask = _sparse_branch_body(
+            branch_idx, max_branches, offs_B, b_mask, csr_row_ptrs, n_children,
+            a_ptr, b_ptr, bias_ptr, csr_trie_cols_vals_ptr, cols_vals_stride_0,
+            corrected_logits_ptr, next_node_ptr, valid_idxs_ptr,
+            a_stride_B, a_stride_K, b_stride_K, b_stride_N,
+            corrected_logits_stride_B, corrected_logits_stride_N,
+            next_node_stride_B, next_node_stride_N,
+            valid_idxs_stride_B, valid_idxs_stride_N,
+            K, BLOCK_B, BLOCK_K, HAS_BIAS,
+        )
+        cur_l = tl.where(child_mask, logit_k, float("-inf"))
+        cur_i = col_k.to(tl.int64)
+
+        while tl.atomic_cas(lock_ptr, 0, 1) == 1:
+            pass
+
+        # Insertion sort: each slot stores the larger of (cur, slot); the smaller
+        # value propagates forward.  All K_TOP iterations unroll at trace time.
+        for slot in range(K_TOP):
+            global_l = tl.load(
+                topk_logits_ptr + offs_B * K_TOP + slot,
+                mask=b_mask,
+                other=float("-inf"),
+            )
+            global_i = tl.load(
+                topk_idxs_ptr + offs_B * K_TOP + slot,
+                mask=b_mask,
+                other=-1,
+            )
+            new_slot_l, new_slot_i, cur_l, cur_i = _bitonic_compare_swap(
+                cur_l, cur_i, global_l, global_i
+            )
+            tl.store(topk_logits_ptr + offs_B * K_TOP + slot, new_slot_l, mask=b_mask)
+            tl.store(topk_idxs_ptr + offs_B * K_TOP + slot, new_slot_i, mask=b_mask)
+
+        tl.debug_barrier()
+        tl.atomic_xchg(lock_ptr, 0)

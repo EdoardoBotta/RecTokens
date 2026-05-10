@@ -32,7 +32,7 @@ WARMUP = 25
 REP = 100
 
 ALL_ALGORITHMS = ["fused", "kernel", "pytorch", "sparse_pytorch", "trie_cpu"]
-DEFAULT_ALGORITHMS = ["fused", "kernel", "pytorch", "sparse_pytorch"]
+DEFAULT_ALGORITHMS = ["fused", "sparse_pytorch"]
 DEFAULT_SPARSITY = 0.01
 
 
@@ -235,7 +235,7 @@ if __name__ == "__main__":
     assert torch.cuda.is_available(), "CUDA required"
     os.makedirs("out", exist_ok=True)
 
-    B_vals = [32, 256, 1024]
+    B_vals = [4096]
     N_vals = [512, 1024, 8192, 150000]
 
     print(f"Benchmarking K={K}, sparsity={args.sparsity}")

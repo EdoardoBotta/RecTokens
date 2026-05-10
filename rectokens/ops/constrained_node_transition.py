@@ -4,6 +4,7 @@ from rectokens.kernels.constrained_node_transition import (
     _constrained_node_transition_op,
     _fused_linear_constrained_node_transition_op,
     _fused_linear_constrained_node_transition_sampling_op,
+    _fused_linear_constrained_node_transition_topk_op,
 )
 from rectokens.schemas.state import ConstraintState
 
@@ -73,6 +74,42 @@ def fused_linear_constrained_node_transition_sampling(
         bias is not None,
         rng_seed=rng_seed,
         temperature=temperature,
+    )
+
+
+def fused_linear_constrained_node_transition_topk(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    constraint_state: ConstraintState,
+    k: int,
+    bias: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Fused linear projection + constrained node transition + top-K selection.
+
+    Only computes dot products for valid (constrained) tokens — skips all others.
+    Returns the top-k logits and their token indices per batch element, suitable
+    for beam search or diverse generation.
+
+    Returns (next_node, valid_idxs, topk_logits, topk_idxs):
+      next_node:   (B, max_branches) int64 — child BFS IDs, -1 for padding
+      valid_idxs:  (B, max_branches) int64 — valid token indices, -1 for padding
+      topk_logits: (B, k) float32          — top-k constrained logits, descending
+      topk_idxs:   (B, k) int64            — corresponding token indices, -1 if < k valid
+    """
+    bias_val = bias if bias is not None else a.new_empty(0)
+    step = constraint_state.step
+    max_branches = constraint_state.trie.layer_max_branches[step]
+    return _fused_linear_constrained_node_transition_topk_op(
+        a,
+        b,
+        bias_val,
+        constraint_state.cur_node,
+        constraint_state.trie.row_ptrs,
+        constraint_state.trie.stacked_cols_vals,
+        max_branches,
+        bias is not None,
+        k,
     )
 
 
