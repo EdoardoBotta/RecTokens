@@ -231,7 +231,9 @@ class TestEncodeSequence(unittest.TestCase):
         ).codes[0]
 
     def _item_ids(self, codes: torch.Tensor) -> list[int]:
-        return [self.aware.item_token_id(l, int(codes[l])) for l in range(NUM_LEVELS)]
+        return [self.aware.item_token_id(l, int(codes[l])) for l in range(NUM_LEVELS)] + [
+            self.aware.item_end_token_id
+        ]
 
     def _text_ids(self, text: str) -> list[int]:
         return self.aware.text_tokenizer.encode(text, add_special_tokens=False)
@@ -254,7 +256,7 @@ class TestEncodeSequence(unittest.TestCase):
 
     def test_item_only_length(self) -> None:
         ids = self.aware.encode_sequence([self.item_emb_a])
-        assert len(ids) == NUM_LEVELS
+        assert len(ids) == NUM_LEVELS + 1  # NUM_LEVELS codes + <|item_end|>
 
     def test_item_semantic_ids_correct_hf_ids(self) -> None:
         """Semantic ID at level l must equal item_token_id(l, code_l)."""

@@ -14,6 +14,12 @@ Modern sequential recommendation models treat item retrieval as a language model
 2. **Constrained Decoding** — At inference time, efficiently restrict the model's generation to only valid item token sequences.
 3. **HuggingFace Integration** — Plug item tokens directly into any pretrained LLM from HuggingFace. `ItemAwareTokenizer` extends an HF text tokenizer with item-level tokens, `ItemAwareCausalLM.from_causal_lm` adapts the model's embedding table, and `InterleavedSequenceCollator` / `PrecomputedSequenceCollator` prepare mixed text+item batches for standard HF `Trainer` fine-tuning. This lets you fine-tune models like Qwen on recommendation sequences with minimal boilerplate.
 
+### Prior Work
+
+RecTokens builds on several lines of research in generative recommendation. The idea of treating item retrieval as a language modeling problem over discrete semantic IDs originates from Rajput et al., [**"Recommender Systems with Generative Retrieval"**](https://arxiv.org/abs/2305.05065) (NeurIPS 2023), which introduced the TIGER system and demonstrated that items can be represented as compact hierarchical token sequences produced by Residual Quantization. He et al., [**"PLUM: Adapting Pre-trained Language Models for Industrial-scale Generative Recommendations"**](https://arxiv.org/abs/2510.07784) (Google, 2025) and Zhou et al., [**"OneRec Technical Report"**](https://arxiv.org/abs/2506.13695) (2025) extend this paradigm to production-scale LLM fine-tuning, validating the approach at the scale of real recommendation systems.
+
+The constrained decoding components — the CSR trie structure and the fused Triton kernels for masked linear projection — are directly inspired by Su et al., [**"Vectorizing the Trie: Efficient Constrained Decoding for LLM-based Generative Retrieval on Accelerators"**](https://arxiv.org/abs/2602.22647) (2026), which introduces the VTNK kernel and shows how to reformulate trie-constrained beam search as a GPU-friendly sparse matrix operation, eliminating the bottleneck of sequential CPU trie traversal at large batch sizes. The fused sampling kernel (`fused_linear_constrained_node_transition_sampling`) additionally incorporates the Gumbel-max trick as described in Ruiz et al., [**"FlashSampling: Fast and Memory-Efficient Exact Sampling"**](https://arxiv.org/abs/2603.15854) (2026), fusing categorical sampling directly into the linear projection pass to avoid materializing the full logit tensor.
+
 ### Residual Quantization
 
 RQ encodes a `D`-dimensional embedding as `L` discrete codes, one per level:
@@ -602,16 +608,6 @@ At N=64, `quantize_fwd_mm` beats FAISS-GPU at every cell: 2.24–20.28×. The ov
 ![mm vs faiss N=256](out/heatmap_mm_vs_faiss_N256.jpg)
 
 This heatmap is the clearest illustration of `quantize_fwd_mm`'s robustness. While `quantize_fwd` fell below FAISS at N=256, D=256, small B, `mm` maintains a positive margin everywhere: 1.60–11.06×. The D=256 column ranges from 1.60× (B=32) to 3.19× (B=65536) — a clear win even in the exact regime where `fwd` lost. The D=64 column reaches 11.06× at B=65536 driven by B-scaling. The bottom-right region (large B, any D) is brightest, consistent with FAISS's fixed overhead being overwhelmed by the volume of useful work. This heatmap, paired with the N=256 fwd vs faiss heatmap, is the strongest argument for preferring `mm` over `fwd` as the default kernel for standard rec-system codebook sizes.
-
-## References
-
-- Rajput et al. **Recommender Systems with Generative Retrieval.** NeurIPS 2023. https://arxiv.org/abs/2305.05065
-
-- He et al. **PLUM: Adapting Pre-trained Language Models for Industrial-scale Generative Recommendations.** Google, 2025. https://arxiv.org/abs/2510.07784
-
-- Zhou et al. **OneRec Technical Report.** 2025. https://arxiv.org/abs/2506.13695
-
-- Su et al. **Vectorizing the Trie: Efficient Constrained Decoding for LLM-based Generative Retrieval on Accelerators.** 2026. https://arxiv.org/abs/2602.22647
 
 ## License
 

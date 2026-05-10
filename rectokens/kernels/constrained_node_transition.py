@@ -176,6 +176,128 @@ def _constrained_node_transition_kernel(
             )
 
 
+_FUSED_AUTOTUNE_CONFIGS = [
+    triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
+    triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
+    triton.Config({"BLOCK_B": 256, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
+    triton.Config({"BLOCK_B": 64, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}),
+    triton.Config({"BLOCK_B": 128, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}),
+    triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
+    triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
+]
+
+
+@triton.jit
+def _sparse_branch_body(
+    branch_idx,
+    max_branches,
+    offs_B,
+    b_mask,
+    csr_row_ptrs,
+    n_children,
+    a_ptr,
+    b_ptr,
+    bias_ptr,
+    csr_trie_cols_vals_ptr,
+    cols_vals_stride_0,
+    corrected_logits_ptr,
+    next_node_ptr,
+    valid_idxs_ptr,
+    a_stride_B,
+    a_stride_K,
+    b_stride_K,
+    b_stride_N,
+    corrected_logits_stride_B,
+    corrected_logits_stride_N,
+    next_node_stride_B,
+    next_node_stride_N,
+    valid_idxs_stride_B,
+    valid_idxs_stride_N,
+    K: tl.constexpr,
+    BLOCK_B: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+):
+    # Shared inner body for both fused kernels: load one branch from the CSR trie,
+    # compute its dot product against the weight matrix, and write the three outputs
+    # (corrected_logits, next_node, valid_idxs). Returns (col_k, logit_k, child_mask)
+    # so the sampling kernel can apply the Gumbel-max update without re-loading.
+    in_range = branch_idx < max_branches
+    child_mask = b_mask & (n_children > branch_idx) & in_range
+
+    col_k = tl.load(
+        csr_trie_cols_vals_ptr + csr_row_ptrs + branch_idx,
+        mask=child_mask,
+        other=-1,
+    )
+    val_k = tl.load(
+        csr_trie_cols_vals_ptr + csr_row_ptrs + branch_idx + cols_vals_stride_0,
+        mask=child_mask,
+        other=-1,
+    )
+
+    logit_k = tl.zeros((BLOCK_B,), dtype=tl.float32)
+    for k_tile in range(0, tl.cdiv(K, BLOCK_K)):
+        offs_K = k_tile * BLOCK_K + tl.arange(0, BLOCK_K)
+        k_mask = offs_K < K
+        a_ptrs = a_ptr + offs_B[:, None] * a_stride_B + offs_K[None, :] * a_stride_K
+        a_chunk = tl.load(a_ptrs, mask=b_mask[:, None] & k_mask[None, :], other=0.0)
+        b_ptrs = b_ptr + offs_K[None, :] * b_stride_K + col_k[:, None] * b_stride_N
+        b_chunk = tl.load(
+            b_ptrs, mask=child_mask[:, None] & k_mask[None, :], other=0.0
+        )
+        logit_k += tl.sum(a_chunk * b_chunk, axis=1)
+
+    if HAS_BIAS:
+        logit_k += tl.load(bias_ptr + col_k, mask=child_mask, other=0.0)
+
+    tl.store(
+        corrected_logits_ptr
+        + offs_B * corrected_logits_stride_B
+        + col_k * corrected_logits_stride_N,
+        logit_k,
+        mask=child_mask,
+    )
+    tl.store(
+        next_node_ptr + offs_B * next_node_stride_B + branch_idx * next_node_stride_N,
+        val_k,
+        mask=b_mask & in_range,
+    )
+    tl.store(
+        valid_idxs_ptr
+        + offs_B * valid_idxs_stride_B
+        + branch_idx * valid_idxs_stride_N,
+        col_k,
+        mask=b_mask & in_range,
+    )
+
+    return col_k, logit_k, child_mask
+
+
+@triton.jit
+def _gumbel_max_update(
+    rng_seed,
+    offs_B,
+    max_branches,
+    branch_idx,
+    logit_k,
+    temperature,
+    child_mask,
+    col_k,
+    block_sample,
+    block_max_gumbel,
+):
+    # See: https://arxiv.org/pdf/2603.15854
+    u = tl.rand(seed=rng_seed, offset=offs_B * max_branches + branch_idx)
+    gumbel = -tl.log(-tl.log(u + 1e-10) + 1e-10)
+    g_k = tl.where(child_mask, logit_k / temperature + gumbel, float("-inf"))
+    improved = g_k > block_max_gumbel
+    return (
+        tl.where(improved, col_k.to(tl.float32), block_sample),
+        tl.where(improved, g_k, block_max_gumbel),
+    )
+
+
 @triton_op("vtnk::_fused_linear_constrained_node_transition_op", mutates_args={})
 def _fused_linear_constrained_node_transition_op(
     a: torch.Tensor,
@@ -239,15 +361,7 @@ def _fused_linear_constrained_node_transition_op(
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
-        triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
-        triton.Config({"BLOCK_B": 256, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
-        triton.Config({"BLOCK_B": 64, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}),
-        triton.Config({"BLOCK_B": 128, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}),
-        triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
-        triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
-    ],
+    configs=_FUSED_AUTOTUNE_CONFIGS,
     key=["B", "K", "N"],
     restore_value=["corrected_logits_ptr", "next_node_ptr", "valid_idxs_ptr"],
 )
@@ -309,93 +423,16 @@ def _fused_sparse_linear_constrained_node_transition_kernel(
 
     for local_br in tl.static_range(BLOCK_BRANCHES):
         branch_idx = pid_BR * BLOCK_BRANCHES + local_br
-        in_range = branch_idx < max_branches
-        child_mask = b_mask & (n_children > branch_idx) & in_range
-
-        col_k = tl.load(
-            csr_trie_cols_vals_ptr + csr_row_ptrs + branch_idx,
-            mask=child_mask,
-            other=-1,
+        _sparse_branch_body(
+            branch_idx, max_branches, offs_B, b_mask, csr_row_ptrs, n_children,
+            a_ptr, b_ptr, bias_ptr, csr_trie_cols_vals_ptr, cols_vals_stride_0,
+            corrected_logits_ptr, next_node_ptr, valid_idxs_ptr,
+            a_stride_B, a_stride_K, b_stride_K, b_stride_N,
+            corrected_logits_stride_B, corrected_logits_stride_N,
+            next_node_stride_B, next_node_stride_N,
+            valid_idxs_stride_B, valid_idxs_stride_N,
+            K, BLOCK_B, BLOCK_K, HAS_BIAS,
         )
-        val_k = tl.load(
-            csr_trie_cols_vals_ptr + csr_row_ptrs + branch_idx + cols_vals_stride_0,
-            mask=child_mask,
-            other=-1,
-        )
-
-        logit_k = tl.zeros((BLOCK_B,), dtype=tl.float32)
-        for k_tile in range(0, tl.cdiv(K, BLOCK_K)):
-            offs_K = k_tile * BLOCK_K + tl.arange(0, BLOCK_K)
-            k_mask = offs_K < K
-
-            a_ptrs = a_ptr + offs_B[:, None] * a_stride_B + offs_K[None, :] * a_stride_K
-            a_chunk = tl.load(a_ptrs, mask=b_mask[:, None] & k_mask[None, :], other=0.0)
-
-            b_ptrs = b_ptr + offs_K[None, :] * b_stride_K + col_k[:, None] * b_stride_N
-            b_chunk = tl.load(
-                b_ptrs, mask=child_mask[:, None] & k_mask[None, :], other=0.0
-            )
-
-            logit_k += tl.sum(a_chunk * b_chunk, axis=1)
-
-        if HAS_BIAS:
-            logit_k += tl.load(bias_ptr + col_k, mask=child_mask, other=0.0)
-
-        out_ptrs = (
-            corrected_logits_ptr
-            + offs_B * corrected_logits_stride_B
-            + col_k * corrected_logits_stride_N
-        )
-        tl.store(out_ptrs, logit_k, mask=child_mask)
-
-        next_node_ptrs = (
-            next_node_ptr
-            + offs_B * next_node_stride_B
-            + branch_idx * next_node_stride_N
-        )
-        valid_idxs_ptrs = (
-            valid_idxs_ptr
-            + offs_B * valid_idxs_stride_B
-            + branch_idx * valid_idxs_stride_N
-        )
-        tl.store(next_node_ptrs, val_k, mask=b_mask & in_range)
-        tl.store(valid_idxs_ptrs, col_k, mask=b_mask & in_range)
-
-
-@triton.jit
-def _gumbel_max_update(
-    rng_seed,
-    offs_B,
-    logit_k,
-    col_k,
-    child_mask,
-    sample,
-    max_logits,
-    branch_idx,
-    max_branches,
-):
-    """
-    One step of the Gumbel-max trick for sampling from a categorical distribution.
-
-    Adds Gumbel noise to logit_k and performs a running argmax over branch slots,
-    equivalent to drawing a sample proportional to softmax(logits) without
-    materialising the full distribution. Called once per branch slot; the caller
-    accumulates (sample, max_logits) across all slots and stores the final sample.
-
-    The offset into the PRNG is offs_B * max_branches + branch_idx so each
-    (batch element, branch slot) pair draws independent noise. Invalid branch
-    slots (child_mask=False) are excluded by forcing their perturbed logit to
-    -inf, preventing them from being selected.
-
-    See: https://arxiv.org/pdf/2603.15854
-    """
-    u = tl.rand(seed=rng_seed, offset=offs_B * max_branches + branch_idx)
-    gumbel = -tl.log(-tl.log(u + 1e-10) + 1e-10)
-    g_k = tl.where(child_mask, logit_k + gumbel, float("-inf"))
-    improved_max = g_k > max_logits
-    return tl.where(improved_max, col_k, sample), tl.where(
-        improved_max, g_k, max_logits
-    )
 
 
 @triton_op(
@@ -483,15 +520,7 @@ def _fused_linear_constrained_node_transition_sampling_op(
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
-        triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
-        triton.Config({"BLOCK_B": 256, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
-        triton.Config({"BLOCK_B": 64, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}),
-        triton.Config({"BLOCK_B": 128, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}),
-        triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
-        triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
-    ],
+    configs=_FUSED_AUTOTUNE_CONFIGS,
     key=["B", "K", "N"],
     restore_value=[
         "corrected_logits_ptr",
@@ -563,69 +592,26 @@ def _fused_sparse_linear_constrained_node_transition_sampling_kernel(
     n_children = csr_next_ptrs - csr_row_ptrs
 
     temperature = tl.load(temperature_ptr)
-
     block_max_gumbel = tl.full((BLOCK_B,), float("-inf"), dtype=tl.float32)
     block_sample = tl.full((BLOCK_B,), -1.0, dtype=tl.float32)
 
     for local_br in tl.static_range(BLOCK_BRANCHES):
         branch_idx = pid_BR * BLOCK_BRANCHES + local_br
-        in_range = branch_idx < max_branches
-        child_mask = b_mask & (n_children > branch_idx) & in_range
-
-        col_k = tl.load(
-            csr_trie_cols_vals_ptr + csr_row_ptrs + branch_idx,
-            mask=child_mask,
-            other=-1,
+        col_k, logit_k, child_mask = _sparse_branch_body(
+            branch_idx, max_branches, offs_B, b_mask, csr_row_ptrs, n_children,
+            a_ptr, b_ptr, bias_ptr, csr_trie_cols_vals_ptr, cols_vals_stride_0,
+            corrected_logits_ptr, next_node_ptr, valid_idxs_ptr,
+            a_stride_B, a_stride_K, b_stride_K, b_stride_N,
+            corrected_logits_stride_B, corrected_logits_stride_N,
+            next_node_stride_B, next_node_stride_N,
+            valid_idxs_stride_B, valid_idxs_stride_N,
+            K, BLOCK_B, BLOCK_K, HAS_BIAS,
         )
-        val_k = tl.load(
-            csr_trie_cols_vals_ptr + csr_row_ptrs + branch_idx + cols_vals_stride_0,
-            mask=child_mask,
-            other=-1,
+        block_sample, block_max_gumbel = _gumbel_max_update(
+            rng_seed, offs_B, max_branches, branch_idx,
+            logit_k, temperature, child_mask, col_k,
+            block_sample, block_max_gumbel,
         )
-
-        logit_k = tl.zeros((BLOCK_B,), dtype=tl.float32)
-        for k_tile in range(0, tl.cdiv(K, BLOCK_K)):
-            offs_K = k_tile * BLOCK_K + tl.arange(0, BLOCK_K)
-            k_mask = offs_K < K
-            a_ptrs = a_ptr + offs_B[:, None] * a_stride_B + offs_K[None, :] * a_stride_K
-            a_chunk = tl.load(a_ptrs, mask=b_mask[:, None] & k_mask[None, :], other=0.0)
-            b_ptrs = b_ptr + offs_K[None, :] * b_stride_K + col_k[:, None] * b_stride_N
-            b_chunk = tl.load(
-                b_ptrs, mask=child_mask[:, None] & k_mask[None, :], other=0.0
-            )
-            logit_k += tl.sum(a_chunk * b_chunk, axis=1)
-
-        if HAS_BIAS:
-            logit_k += tl.load(bias_ptr + col_k, mask=child_mask, other=0.0)
-
-        tl.store(
-            corrected_logits_ptr
-            + offs_B * corrected_logits_stride_B
-            + col_k * corrected_logits_stride_N,
-            logit_k,
-            mask=child_mask,
-        )
-        tl.store(
-            next_node_ptr
-            + offs_B * next_node_stride_B
-            + branch_idx * next_node_stride_N,
-            val_k,
-            mask=b_mask & in_range,
-        )
-        tl.store(
-            valid_idxs_ptr
-            + offs_B * valid_idxs_stride_B
-            + branch_idx * valid_idxs_stride_N,
-            col_k,
-            mask=b_mask & in_range,
-        )
-
-        u = tl.rand(seed=rng_seed, offset=offs_B * max_branches + branch_idx)
-        gumbel = -tl.log(-tl.log(u + 1e-10) + 1e-10)
-        g_k = tl.where(child_mask, logit_k / temperature + gumbel, float("-inf"))
-        improved = g_k > block_max_gumbel
-        block_sample = tl.where(improved, col_k.to(tl.float32), block_sample)
-        block_max_gumbel = tl.where(improved, g_k, block_max_gumbel)
 
     # Cross-block Gumbel-max reduction: spinlock protects per-batch-block update.
     # tl.atomic_max on float32 is not correct for negative values, so we use a
