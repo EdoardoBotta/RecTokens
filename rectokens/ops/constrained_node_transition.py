@@ -3,6 +3,7 @@ import torch
 from rectokens.kernels.constrained_node_transition import (
     _constrained_node_transition_op,
     _fused_linear_constrained_node_transition_op,
+    _fused_linear_constrained_node_transition_sampling_op,
 )
 from rectokens.schemas.state import ConstraintState
 
@@ -39,6 +40,40 @@ def fused_linear_constrained_node_transition(
         constraint_state.trie.stacked_cols_vals,
         max_branches,
         bias is not None,
+    )
+
+
+def fused_linear_constrained_node_transition_sampling(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    constraint_state: ConstraintState,
+    bias: torch.Tensor | None = None,
+    rng_seed: int | None = None,
+    temperature: float | torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Fused linear projection + constrained node transition + Gumbel-max sampling.
+
+    Returns (next_node, valid_idxs, corrected_logits, sample):
+      next_node:        (B, max_branches) int64 — child BFS IDs, -1 for padding
+      valid_idxs:       (B, max_branches) int64 — valid token indices, -1 for padding
+      corrected_logits: (B, N) float32 — logits for valid tokens, -inf elsewhere
+      sample:           (B,) float32 — sampled token index per batch element
+    """
+    bias_val = bias if bias is not None else a.new_empty(0)
+    step = constraint_state.step
+    max_branches = constraint_state.trie.layer_max_branches[step]
+    return _fused_linear_constrained_node_transition_sampling_op(
+        a,
+        b,
+        bias_val,
+        constraint_state.cur_node,
+        constraint_state.trie.row_ptrs,
+        constraint_state.trie.stacked_cols_vals,
+        max_branches,
+        bias is not None,
+        rng_seed=rng_seed,
+        temperature=temperature,
     )
 
 

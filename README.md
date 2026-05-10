@@ -211,6 +211,7 @@ The core primitive for constrained decoding is a masked linear projection. Two i
 
 - **`vtnk_pytorch`** — Pure PyTorch; applies a validity mask to logits before sampling.
 - **`fused_linear_constrained_node_transition`** — Custom Triton kernel that fuses the matrix multiply and constraint masking into a single GPU kernel for maximum throughput.
+- **`fused_linear_constrained_node_transition_sampling`** — Extends the fused kernel to additionally fuse multinomial sampling into the same GPU pass, eliminating a separate `torch.multinomial` call.
 
 ## HuggingFace Integration
 
@@ -361,6 +362,7 @@ generated = autoregressive_generate(
 | `examples/scripts/preprocessing/precompute_sequences.py` | Encode items + assemble interleaved token-ID sequences for all users |
 | `examples/scripts/eval/eval_retrieval.py` | Evaluate next-item retrieval with constrained beam search |
 | `examples/scripts/benchmark/benchmark_vtnk.py` | Benchmark constrained decoding implementations |
+| `examples/scripts/benchmark/benchmark_fused_sample.py` | Benchmark fused sampling kernel vs sparse PyTorch + multinomial |
 | `examples/scripts/benchmark/benchmark_nn_quantize.py` | Benchmark nearest-neighbor quantization kernels |
 
 All scripts accept a single positional gin config file. Ready-made configs live in `examples/configs/` organized into `pretraining/`, `finetuning/`, and `preprocessing/` subdirectories.
@@ -408,6 +410,7 @@ examples/
 │   │   └── precompute_sequences.py    # Precompute interleaved token-ID sequences
 │   └── benchmark/
 │       ├── benchmark_vtnk.py          # Benchmark constrained decoding
+│       ├── benchmark_fused_sample.py  # Benchmark fused sampling kernel
 │       └── benchmark_nn_quantize.py   # Benchmark nearest-neighbor quantization
 └── utils.py            # parse_config() gin helper
 ```
@@ -442,7 +445,7 @@ python -m pytest tests/test_hf_integration.py
 
 ## Performance
 
-The `examples/scripts/benchmark/benchmark_vtnk.py` script benchmarks constrained decoding implementations across batch sizes (`B ∈ {32, 256, 1024}`) and vocabulary sizes (`N ∈ {512, 1024, 8192, 150000}`). The fused Triton kernel provides 10–100× speedup over CPU trie traversal at large vocabulary and batch sizes.
+The `examples/scripts/benchmark/benchmark_vtnk.py` script benchmarks constrained decoding implementations across batch sizes (`B ∈ {32, 256, 1024}`) and vocabulary sizes (`N ∈ {512, 1024, 8192, 150000}`). All results below were obtained with **1% sparsity** (i.e. the trie has at most `0.01 × N` valid next tokens at each node), with hidden dim K=512 fixed.
 
 ```bash
 python -m examples.scripts.benchmark.benchmark_vtnk
@@ -450,11 +453,11 @@ python -m examples.scripts.benchmark.benchmark_vtnk
 
 ### Fused Kernel Speedup Heatmaps
 
-This section benchmarks `fused_linear_constrained_node_transition` — the kernel that fuses the linear projection and CSR trie constraint into a single GPU pass — against four baselines. Each heatmap reports the speedup ratio (values > 1 mean the fused kernel is faster) across batch sizes (B ∈ {32, 256, 1024}) and vocabulary sizes (N ∈ {512, 1024, 8192, 150000}), with hidden dim K=512 fixed.
+This section benchmarks `fused_linear_constrained_node_transition` — the kernel that fuses the linear projection and CSR trie constraint into a single GPU pass — against four baselines. Each heatmap reports the speedup ratio (values > 1 mean the fused kernel is faster) across batch sizes (B ∈ {32, 256, 1024}) and vocabulary sizes (N ∈ {512, 1024, 8192, 150000}), with hidden dim K=512 and 1% sparsity.
 
-**Summary of findings.** The fused kernel consistently outperforms all GPU baselines at large vocabulary sizes (N ≥ 8192) and its advantage grows with both N and B. At N=150k the fused kernel is **6–8× faster** than the two-kernel approach (separate matmul + constraint pass) and **6–7.6× faster** than the dense PyTorch baseline, because fusing the linear projection and CSR mask into a single Triton kernel eliminates the intermediate logit buffer and the second kernel-launch overhead — costs that scale directly with N×B. Against sparse PyTorch the advantage is more modest (1.4–3.9×) and narrows at large N + large B, since sparse PyTorch already skips a large fraction of the matmul work; the fused kernel is most effective relative to this baseline at small-to-medium vocab (N ≤ 8192).
+**Summary of findings.** The fused kernel consistently outperforms all GPU baselines at large vocabulary sizes (N ≥ 8192) and its advantage grows with both N and B. At N=150k the fused kernel is **76–122× faster** than the two-kernel approach (separate matmul + constraint pass) and **4–9× faster** than the dense PyTorch baseline, because fusing the linear projection and CSR mask into a single Triton kernel eliminates the intermediate logit buffer and the second kernel-launch overhead — costs that scale directly with N. Against sparse PyTorch the advantage ranges from **8–10×** at small-to-medium vocab (N ≤ 1024) down to **1.6–5.6×** at N=150k, as sparse PyTorch already skips the majority of the matmul work and its relative advantage over the fused kernel grows at very large N and B.
 
-At small vocabulary (N ≤ 1024) the fused kernel is **slower** than the two-kernel approach (0.24–0.75×). Here the matmul is small enough that cuBLAS (used by `torch.compile(nn.Linear)`) outperforms the hand-written Triton tile, and the savings from avoiding a second kernel launch do not compensate.
+At small vocabulary (N ≤ 512) the fused kernel is **slower** than the two-kernel approach (0.68–0.74×). Here the matmul is small enough that cuBLAS (used by `torch.compile(nn.Linear)`) outperforms the hand-written Triton tile, and the savings from avoiding a second kernel launch do not compensate.
 
 Against CPU trie traversal the fused kernel wins by **17–625×**, with the largest margins at large batch sizes where the CPU baseline scales linearly with B while the GPU kernel processes the entire batch in parallel. The speedup narrows at N=150k (17–95×) as GPU compute time grows, but the fused kernel remains the clear winner across the board.
 
@@ -469,6 +472,21 @@ Against CPU trie traversal the fused kernel wins by **17–625×**, with the lar
 
 **vs CPU Trie** — Pure Python traversal of an in-memory `Trie` on CPU, iterating over each batch item to collect valid next tokens. Included as the reference baseline for the constrained decoding problem.
 ![fused vs cpu trie](out/heatmap_fused_vs_trie_cpu.jpg)
+
+### Fused Sample Kernel Speedup
+
+The `examples/scripts/benchmark/benchmark_fused_sample.py` script benchmarks `fused_linear_constrained_node_transition_sampling` — a Triton kernel that fuses the linear projection, CSR trie masking, **and** multinomial sampling into a single GPU pass — against `torch.compile(sparse_linear_pytorch)` followed by a separate `torch.softmax` + `torch.multinomial` call. Grid and setup are the same as above (K=512, 1% sparsity).
+
+```bash
+python -m examples.scripts.benchmark.benchmark_fused_sample
+```
+
+**Summary of findings.** The fused sample kernel provides consistent speedups across small-to-medium vocabulary sizes but regresses at the extreme large-batch + large-vocab corner.
+
+At N ≤ 1024 the fused kernel is **9–11× faster** across all batch sizes: fusing the sampling step eliminates a `softmax` pass and a separate `torch.multinomial` kernel launch whose overhead rivals the matmul cost at small N. At N=8192 the advantage narrows to **6–7×** — the multinomial over ~82 valid tokens is cheap and sparse PyTorch's matmul savings begin to show. At N=150k the picture splits by batch size: for B ∈ {32, 256} the fused kernel is still **2.8–5.9× faster** because sparse PyTorch still needs the separate multinomial pass over 1500 valid candidates; for B=1024 the fused kernel is **~3× slower** (0.30×), as the in-kernel sampling loop does not parallelize efficiently across the 1500-branch mask at this batch volume while PyTorch's `torch.multinomial` dispatches a well-optimized CUDA kernel over the pre-computed logits. The practical recommendation: use `fused_linear_constrained_node_transition_sampling` for N ≤ 8192 or whenever B < 1024 at large vocab; fall back to the separate-sample path at B=1024, N=150k.
+
+**vs Sparse PyTorch + multinomial** — `torch.compile(sparse_linear_pytorch)` (skips invalid-token columns during the matmul) followed by `torch.softmax` and `torch.multinomial`. This is the two-step baseline that separates projection from sampling.
+![fused sample vs sparse pytorch](out/heatmap_fused_sample_vs_sparse_pytorch.jpg)
 
 ## Nearest-Neighbor Quantization Kernels
 

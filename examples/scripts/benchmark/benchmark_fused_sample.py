@@ -23,11 +23,12 @@ from rectokens.ops.constrained_node_transition import (
 
 DEVICE = torch.device("cuda")
 K = 512
-MAX_BRANCHES = 16
 WARMUP = 25
 REP = 100
 
 ALL_ALGORITHMS = ["fused_sample", "sparse_pytorch_sample"]
+DEFAULT_ALGORITHMS = ["fused_sample", "sparse_pytorch_sample"]
+DEFAULT_SPARSITY = 0.01
 
 
 def lex_sort(rows: list[list[int]]) -> torch.Tensor:
@@ -49,15 +50,16 @@ def run_bench(fn):
     return testing.do_bench(fn, warmup=WARMUP, rep=REP)
 
 
-def benchmark_grid(B_vals, N_vals, algorithms):
+def benchmark_grid(B_vals, N_vals, algorithms, sparsity):
     alg_set = set(algorithms)
     records = []
 
     for B in B_vals:
         for N in N_vals:
-            print(f"  B={B:6d}  N={N:6d}")
+            max_branches = max(1, int(N * sparsity))
+            print(f"  B={B:6d}  N={N:6d}  max_branches={max_branches}")
 
-            csr = make_csr(vocab_size=N, max_branches=MAX_BRANCHES)
+            csr = make_csr(vocab_size=N, max_branches=max_branches)
 
             a = torch.randn(B, K, device=DEVICE)
             weight = torch.randn(N, K, device=DEVICE)
@@ -132,9 +134,15 @@ if __name__ == "__main__":
         "--algorithms",
         nargs="+",
         choices=ALL_ALGORITHMS,
-        default=ALL_ALGORITHMS,
+        default=DEFAULT_ALGORITHMS,
         metavar="ALGO",
-        help=f"Algorithms to benchmark. Choices: {ALL_ALGORITHMS} (default: all)",
+        help=f"Algorithms to benchmark. Choices: {ALL_ALGORITHMS} (default: {DEFAULT_ALGORITHMS})",
+    )
+    parser.add_argument(
+        "--sparsity",
+        type=float,
+        default=DEFAULT_SPARSITY,
+        help="Fraction of vocab used as max branches (default: %(default)s)",
     )
     args = parser.parse_args()
 
@@ -144,12 +152,12 @@ if __name__ == "__main__":
     B_vals = [32, 256, 1024]
     N_vals = [512, 1024, 8192, 150000]
 
-    print(f"Benchmarking K={K}, max_branches={MAX_BRANCHES}")
+    print(f"Benchmarking K={K}, sparsity={args.sparsity}")
     print(f"Algorithms: {args.algorithms}")
     print(f"B_vals={B_vals}")
     print(f"N_vals={N_vals}\n")
 
-    df = benchmark_grid(B_vals, N_vals, algorithms=args.algorithms)
+    df = benchmark_grid(B_vals, N_vals, algorithms=args.algorithms, sparsity=args.sparsity)
     csv_path = "out/bench_fused_sample.csv"
     df.to_csv(csv_path, index=False)
     print(f"\nSaved {csv_path}\n")
