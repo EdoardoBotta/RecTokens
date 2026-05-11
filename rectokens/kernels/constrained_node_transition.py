@@ -841,6 +841,8 @@ def _fused_sparse_linear_constrained_node_transition_topk_kernel(
     # Spinlock pointer for this batch block — shared across all pid_BR blocks.
     lock_ptr = locks_ptr + pid_B // tl.cdiv(B, BLOCK_B * num_locks)
 
+    # Phase 1: write next_node / valid_idxs — each (batch, branch_idx) address is
+    # unique across blocks, so no lock is needed here.
     for local_br in tl.static_range(BLOCK_BRANCHES):
         branch_idx = pid_BR * BLOCK_BRANCHES + local_br
         in_range   = branch_idx < max_branches
@@ -853,14 +855,22 @@ def _fused_sparse_linear_constrained_node_transition_topk_kernel(
             valid_idxs_ptr, valid_idxs_stride_B, valid_idxs_stride_N,
         )
 
+    # Phase 2: merge all BLOCK_BRANCHES candidates into the global top-k under a
+    # single lock acquisition instead of one per branch.
+    while tl.atomic_cas(lock_ptr, 0, 1) == 1:
+        pass
+
+    # Insertion sort: each slot stores the larger of (cur, slot); the smaller
+    # value propagates forward. All K_TOP iterations unroll at trace time.
+    for local_br in tl.static_range(BLOCK_BRANCHES):
+        branch_idx = pid_BR * BLOCK_BRANCHES + local_br
+        in_range   = branch_idx < max_branches
+        col_k, val_k, c_mask, logit_k = _extract_branch(
+            local_br, branch_cols, branch_vals, branch_valid, logits, BLOCK_BRANCHES,
+        )
         cur_l = tl.where(c_mask, logit_k, float("-inf"))
         cur_i = col_k.to(tl.int64)
 
-        while tl.atomic_cas(lock_ptr, 0, 1) == 1:
-            pass
-
-        # Insertion sort: each slot stores the larger of (cur, slot); the smaller
-        # value propagates forward. All K_TOP iterations unroll at trace time.
         for slot in range(K_TOP):
             global_l = tl.load(
                 topk_logits_ptr + offs_B * K_TOP + slot,
@@ -878,5 +888,5 @@ def _fused_sparse_linear_constrained_node_transition_topk_kernel(
             tl.store(topk_logits_ptr + offs_B * K_TOP + slot, new_slot_l, mask=b_mask)
             tl.store(topk_idxs_ptr + offs_B * K_TOP + slot, new_slot_i, mask=b_mask)
 
-        tl.debug_barrier()
-        tl.atomic_xchg(lock_ptr, 0)
+    tl.debug_barrier()
+    tl.atomic_xchg(lock_ptr, 0)
