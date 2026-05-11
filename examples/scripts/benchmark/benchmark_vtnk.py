@@ -32,7 +32,7 @@ WARMUP = 25
 REP = 100
 
 ALL_ALGORITHMS = ["fused", "kernel", "pytorch", "sparse_pytorch", "trie_cpu"]
-DEFAULT_ALGORITHMS = ["fused", "kernel", "pytorch", "sparse_pytorch", "trie_cpu"]
+DEFAULT_ALGORITHMS = ["fused", "kernel", "pytorch", "sparse_pytorch"]
 DEFAULT_SPARSITY = 0.01
 
 

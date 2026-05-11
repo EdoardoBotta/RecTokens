@@ -50,15 +50,14 @@ def fused_linear_constrained_node_transition_sampling(
     bias: torch.Tensor | None = None,
     rng_seed: int | None = None,
     temperature: float | torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Fused linear projection + constrained node transition + Gumbel-max sampling.
 
-    Returns (next_node, valid_idxs, corrected_logits, sample):
-      next_node:        (B, max_branches) int64 — child BFS IDs, -1 for padding
-      valid_idxs:       (B, max_branches) int64 — valid token indices, -1 for padding
-      corrected_logits: (B, N) float32 — logits for valid tokens, -inf elsewhere
-      sample:           (B,) float32 — sampled token index per batch element
+    Returns (next_node, valid_idxs, sample):
+      next_node:  (B, max_branches) int64 — child BFS IDs, -1 for padding
+      valid_idxs: (B, max_branches) int64 — valid token indices, -1 for padding
+      sample:     (B,) float32 — sampled token index per batch element
     """
     bias_val = bias if bias is not None else a.new_empty(0)
     step = constraint_state.step
@@ -111,7 +110,6 @@ def fused_linear_constrained_node_transition_topk(
         bias is not None,
         k,
     )
-
 
 def constrained_node_transition(
     logits: torch.Tensor,
