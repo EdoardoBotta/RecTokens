@@ -32,7 +32,7 @@ WARMUP = 25
 REP = 100
 
 ALL_ALGORITHMS = ["fused", "kernel", "pytorch", "sparse_pytorch", "trie_cpu"]
-DEFAULT_ALGORITHMS = ["fused", "sparse_pytorch"]
+DEFAULT_ALGORITHMS = ["fused", "kernel", "pytorch", "sparse_pytorch", "trie_cpu"]
 DEFAULT_SPARSITY = 0.01
 
 
@@ -100,6 +100,7 @@ def run_bench_cpu(fn, warmup: int = WARMUP, rep: int = REP) -> float:
 def benchmark_grid(B_vals, N_vals, algorithms, sparsity):
     alg_set = set(algorithms)
     gpu_algos = alg_set & {"fused", "kernel", "pytorch", "sparse_pytorch"}
+    max_B, max_N = max(B_vals), max(N_vals)
     records = []
 
     for B in B_vals:
@@ -107,23 +108,27 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity):
             max_branches = max(1, int(N * sparsity))
             print(f"  B={B:6d}  N={N:6d}  max_branches={max_branches}")
 
+            # CPU traversal is too slow to run at the highest N and B values
+            skip_cpu = B == max_B or N == max_N
+            active_alg_set = alg_set - ({"trie_cpu"} if skip_cpu else set())
+
             if gpu_algos:
                 csr = make_csr(vocab_size=N, max_branches=max_branches)
-            if "trie_cpu" in alg_set:
+            if "trie_cpu" in active_alg_set:
                 _, trie_nodes = make_trie(max_branches=max_branches)
 
             a = torch.randn(B, K, device=DEVICE)
             weight = torch.randn(N, K, device=DEVICE)
             cur_node = torch.zeros(B, dtype=torch.long, device=DEVICE)
-            if "trie_cpu" in alg_set:
+            if "trie_cpu" in active_alg_set:
                 cur_node_cpu = cur_node.cpu()
 
-            if "pytorch" in alg_set:
+            if "pytorch" in active_alg_set:
                 linear = torch.compile(nn.Linear(K, N, bias=False).to(DEVICE))
                 with torch.no_grad():
                     linear.weight.data.copy_(weight)
 
-            if "sparse_pytorch" in alg_set:
+            if "sparse_pytorch" in active_alg_set:
                 sparse_linear_pytorch_compiled = torch.compile(sparse_linear_pytorch)
 
             if gpu_algos:
@@ -131,57 +136,57 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity):
 
             # --- warmup / force compilation ---
             with torch.no_grad():
-                if "fused" in alg_set:
+                if "fused" in active_alg_set:
                     fused_linear_constrained_node_transition(a, weight.T, cs)
-                if "kernel" in alg_set:
+                if "kernel" in active_alg_set:
                     constrained_node_transition(a @ weight.T, cs)
-                if "pytorch" in alg_set:
+                if "pytorch" in active_alg_set:
                     vtnk_pytorch(linear(a), cur_node, csr, step=0)
-                if "sparse_pytorch" in alg_set:
+                if "sparse_pytorch" in active_alg_set:
                     sparse_linear_pytorch_compiled(a, weight, cur_node, csr, step=0)
 
             record = {"B": B, "N": N}
 
             # --- benchmark ---
             with torch.no_grad():
-                if "fused" in alg_set:
+                if "fused" in active_alg_set:
                     record["ms_fused"] = run_bench(
                         lambda: fused_linear_constrained_node_transition(
                             a, weight.T, cs
                         )
                     )
-                if "kernel" in alg_set:
+                if "kernel" in active_alg_set:
                     record["ms_kernel"] = run_bench(
                         lambda: constrained_node_transition(a @ weight.T, cs)
                     )
-                if "pytorch" in alg_set:
+                if "pytorch" in active_alg_set:
                     record["ms_pytorch"] = run_bench(
                         lambda: vtnk_pytorch(linear(a), cur_node, csr, step=0)
                     )
-                if "sparse_pytorch" in alg_set:
+                if "sparse_pytorch" in active_alg_set:
                     record["ms_sparse_pytorch"] = run_bench(
                         lambda: sparse_linear_pytorch_compiled(
                             a, weight, cur_node, csr, step=0
                         )
                     )
-            if "trie_cpu" in alg_set:
+            if "trie_cpu" in active_alg_set:
                 record["ms_trie_cpu"] = run_bench_cpu(
                     lambda: trie_cpu_traversal(cur_node_cpu, trie_nodes, N)
                 )
 
-            if "fused" in alg_set and "kernel" in alg_set:
+            if "fused" in active_alg_set and "kernel" in active_alg_set:
                 record["speedup_fused_vs_kernel"] = (
                     record["ms_kernel"] / record["ms_fused"]
                 )
-            if "fused" in alg_set and "pytorch" in alg_set:
+            if "fused" in active_alg_set and "pytorch" in active_alg_set:
                 record["speedup_fused_vs_pytorch"] = (
                     record["ms_pytorch"] / record["ms_fused"]
                 )
-            if "fused" in alg_set and "sparse_pytorch" in alg_set:
+            if "fused" in active_alg_set and "sparse_pytorch" in active_alg_set:
                 record["speedup_fused_vs_sparse_pytorch"] = (
                     record["ms_sparse_pytorch"] / record["ms_fused"]
                 )
-            if "fused" in alg_set and "trie_cpu" in alg_set:
+            if "fused" in active_alg_set and "trie_cpu" in active_alg_set:
                 record["speedup_fused_vs_trie_cpu"] = (
                     record["ms_trie_cpu"] / record["ms_fused"]
                 )
@@ -235,7 +240,7 @@ if __name__ == "__main__":
     assert torch.cuda.is_available(), "CUDA required"
     os.makedirs("out", exist_ok=True)
 
-    B_vals = [4096]
+    B_vals = [256, 1024, 4096]
     N_vals = [512, 1024, 8192, 150000]
 
     print(f"Benchmarking K={K}, sparsity={args.sparsity}")
