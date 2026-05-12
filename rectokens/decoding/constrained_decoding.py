@@ -224,7 +224,12 @@ def decode_one_step(
 
     use_constrained = constrained_linear is not None and step >= len(trie.dense_mask_by_layer)
     ctx = (
-        constrained_linear.constrained(constrained_generation_state.constraint_state)
+        constrained_linear.constrained(
+            constrained_generation_state.constraint_state,
+            strategy=config.csr_kernel,
+            temperature=config.temperature,
+            k=config.beam_size,
+        )
         if use_constrained
         else contextlib.nullcontext()
     )
@@ -271,8 +276,19 @@ def decode_one_step(
             )
 
     # Sample beam_size candidates per current beam: (current_batch, beam_size)
-    if config.temperature == 0.0:
-        # Greedy top-k: take the beam_size highest-logit tokens directly
+    if use_constrained and constrained_linear.sample is not None:
+        # Fused sampling kernel already drew one token per batch element.
+        samples_batched = constrained_linear.sample.long().unsqueeze(1)  # (B, 1)
+        sampled_log_probas = torch.zeros(
+            current_batch_size, 1, dtype=torch.float, device=logits.device
+        )
+    elif use_constrained and constrained_linear.topk_idxs is not None:
+        # Fused top-k kernel returned the beam_size best token IDs and their logits.
+        # logits here is (B, beam_size) from SparseLinear.forward.
+        samples_batched = constrained_linear.topk_idxs  # (B, beam_size) actual token IDs
+        sampled_log_probas = F.log_softmax(logits, dim=-1)  # (B, beam_size)
+    elif config.temperature == 0.0:
+        # Greedy top-k: take the beam_size highest-logit tokens directly.
         _, samples_batched = logits.topk(beam_size, dim=-1)
         sampled_log_probas = F.log_softmax(logits, dim=-1).gather(1, samples_batched)
     else:
