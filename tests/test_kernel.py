@@ -229,8 +229,8 @@ class TestKernel(unittest.TestCase):
         constraint_state = ConstraintState(
             step=step, trie=self.csr_small, cur_node=cur_node
         )
-        ker_nn, ker_vi, ker_topk_l, ker_topk_i = fused_linear_constrained_node_transition_topk(
-            a, b, constraint_state, k
+        ker_nn, ker_vi, ker_topk_l, ker_topk_i = (
+            fused_linear_constrained_node_transition_topk(a, b, constraint_state, k)
         )
         # Sort both along k-dim to handle tie-breaking differences.
         assert torch.allclose(

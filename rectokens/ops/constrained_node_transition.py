@@ -111,6 +111,7 @@ def fused_linear_constrained_node_transition_topk(
         k,
     )
 
+
 def constrained_node_transition(
     logits: torch.Tensor,
     constraint_state: ConstraintState,

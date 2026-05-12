@@ -231,9 +231,9 @@ class TestEncodeSequence(unittest.TestCase):
         ).codes[0]
 
     def _item_ids(self, codes: torch.Tensor) -> list[int]:
-        return [self.aware.item_token_id(l, int(codes[l])) for l in range(NUM_LEVELS)] + [
-            self.aware.item_end_token_id
-        ]
+        return [
+            self.aware.item_token_id(l, int(codes[l])) for l in range(NUM_LEVELS)
+        ] + [self.aware.item_end_token_id]
 
     def _text_ids(self, text: str) -> list[int]:
         return self.aware.text_tokenizer.encode(text, add_special_tokens=False)

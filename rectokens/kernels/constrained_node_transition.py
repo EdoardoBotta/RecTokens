@@ -195,16 +195,18 @@ _FUSED_AUTOTUNE_CONFIGS = [
 @triton.jit
 def _load_csr_state(offs_B, b_mask, cur_node_ptr, csr_trie_row_ptr):
     """Load (csr_row_ptrs, n_children) for the current batch from the CSR trie."""
-    cur_node      = tl.load(cur_node_ptr + offs_B, mask=b_mask, other=-1)
-    csr_row_ptrs  = tl.load(csr_trie_row_ptr + cur_node, mask=cur_node >= 0, other=0)
-    csr_next_ptrs = tl.load(csr_trie_row_ptr + cur_node + 1, mask=cur_node >= 0, other=0)
+    cur_node = tl.load(cur_node_ptr + offs_B, mask=b_mask, other=-1)
+    csr_row_ptrs = tl.load(csr_trie_row_ptr + cur_node, mask=cur_node >= 0, other=0)
+    csr_next_ptrs = tl.load(
+        csr_trie_row_ptr + cur_node + 1, mask=cur_node >= 0, other=0
+    )
     return csr_row_ptrs, csr_next_ptrs - csr_row_ptrs
 
 
 @triton.jit
 def _select_branch(
     local_br: tl.constexpr,
-    branch_cols,   # [BLOCK_B, BLOCK_BRANCHES]
+    branch_cols,  # [BLOCK_B, BLOCK_BRANCHES]
     branch_valid,  # [BLOCK_B, BLOCK_BRANCHES]
     BLOCK_BRANCHES: tl.constexpr,
 ):
@@ -213,35 +215,45 @@ def _select_branch(
     br_sel is the compile-time column selector; col_k and c_mask are [BLOCK_B] vectors.
     """
     br_sel = tl.arange(0, BLOCK_BRANCHES) == local_br  # [BLOCK_BRANCHES], compile-time
-    col_k  = tl.sum(tl.where(br_sel[None, :], branch_cols, 0), axis=1)
-    c_mask = tl.sum(
-        tl.where(br_sel[None, :], branch_valid.to(tl.int32), 0), axis=1
-    ).to(tl.int1)
+    col_k = tl.sum(tl.where(br_sel[None, :], branch_cols, 0), axis=1)
+    c_mask = tl.sum(tl.where(br_sel[None, :], branch_valid.to(tl.int32), 0), axis=1).to(
+        tl.int1
+    )
     return br_sel, col_k, c_mask
 
 
 @triton.jit
 def _extract_branch(
     local_br: tl.constexpr,
-    branch_cols,   # [BLOCK_B, BLOCK_BRANCHES]
-    branch_vals,   # [BLOCK_B, BLOCK_BRANCHES]
+    branch_cols,  # [BLOCK_B, BLOCK_BRANCHES]
+    branch_vals,  # [BLOCK_B, BLOCK_BRANCHES]
     branch_valid,  # [BLOCK_B, BLOCK_BRANCHES]
-    logits,        # [BLOCK_B, BLOCK_BRANCHES]
+    logits,  # [BLOCK_B, BLOCK_BRANCHES]
     BLOCK_BRANCHES: tl.constexpr,
 ):
     """Return (col_k, val_k, c_mask, logit_k) — all [BLOCK_B] — for branch slot local_br."""
-    br_sel, col_k, c_mask = _select_branch(local_br, branch_cols, branch_valid, BLOCK_BRANCHES)
-    val_k   = tl.sum(tl.where(br_sel[None, :], branch_vals, 0), axis=1)
+    br_sel, col_k, c_mask = _select_branch(
+        local_br, branch_cols, branch_valid, BLOCK_BRANCHES
+    )
+    val_k = tl.sum(tl.where(br_sel[None, :], branch_vals, 0), axis=1)
     logit_k = tl.sum(tl.where(br_sel[None, :], logits, 0.0), axis=1)
     return col_k, val_k, c_mask, logit_k
 
 
 @triton.jit
 def _store_branch_outputs(
-    offs_B, b_mask, in_range, branch_idx,
-    col_k, val_k,
-    next_node_ptr, next_node_stride_B, next_node_stride_N,
-    valid_idxs_ptr, valid_idxs_stride_B, valid_idxs_stride_N,
+    offs_B,
+    b_mask,
+    in_range,
+    branch_idx,
+    col_k,
+    val_k,
+    next_node_ptr,
+    next_node_stride_B,
+    next_node_stride_N,
+    valid_idxs_ptr,
+    valid_idxs_stride_B,
+    valid_idxs_stride_N,
 ):
     """Write val_k → next_node and col_k → valid_idxs for one branch slot."""
     tl.store(
@@ -250,7 +262,9 @@ def _store_branch_outputs(
         mask=b_mask & in_range,
     )
     tl.store(
-        valid_idxs_ptr + offs_B * valid_idxs_stride_B + branch_idx * valid_idxs_stride_N,
+        valid_idxs_ptr
+        + offs_B * valid_idxs_stride_B
+        + branch_idx * valid_idxs_stride_N,
         col_k,
         mask=b_mask & in_range,
     )
@@ -320,7 +334,9 @@ def _compute_branch_logits(
         )  # [BLOCK_B, BLOCK_K]
 
         for local_br in tl.static_range(BLOCK_BRANCHES):
-            br_sel, col_k, c_mask = _select_branch(local_br, branch_cols, branch_valid, BLOCK_BRANCHES)
+            br_sel, col_k, c_mask = _select_branch(
+                local_br, branch_cols, branch_valid, BLOCK_BRANCHES
+            )
             b_chunk = tl.load(
                 b_ptr + offs_K[None, :] * b_stride_K + col_k[:, None] * b_stride_N,
                 mask=c_mask[:, None] & k_mask[None, :],
@@ -331,7 +347,9 @@ def _compute_branch_logits(
 
     if HAS_BIAS:
         for local_br in tl.static_range(BLOCK_BRANCHES):
-            br_sel, col_k, c_mask = _select_branch(local_br, branch_cols, branch_valid, BLOCK_BRANCHES)
+            br_sel, col_k, c_mask = _select_branch(
+                local_br, branch_cols, branch_valid, BLOCK_BRANCHES
+            )
             bias_k = tl.load(bias_ptr + col_k, mask=c_mask, other=0.0)
             logits = tl.where(br_sel[None, :], logits + bias_k[:, None], logits)
 
@@ -359,18 +377,6 @@ def _gumbel_max_update(
     return (
         tl.where(improved, col_k.to(tl.float32), block_sample),
         tl.where(improved, g_k, block_max_gumbel),
-    )
-
-
-@triton.jit
-def _bitonic_compare_swap(val_a, idx_a, val_b, idx_b):
-    """Descending compare-and-swap; returns (larger_val, larger_idx, smaller_val, smaller_idx)."""
-    swap = val_a < val_b
-    return (
-        tl.where(swap, val_b, val_a),
-        tl.where(swap, idx_b, idx_a),
-        tl.where(swap, val_a, val_b),
-        tl.where(swap, idx_a, idx_b),
     )
 
 
@@ -480,27 +486,50 @@ def _fused_sparse_linear_constrained_node_transition_kernel(
     max_branches,
     HAS_BIAS: tl.constexpr,
 ):
-    pid_B  = tl.program_id(axis=0)
+    pid_B = tl.program_id(axis=0)
     pid_BR = tl.program_id(axis=1)
 
-    offs_B  = pid_B  * BLOCK_B  + tl.arange(0, BLOCK_B)
+    offs_B = pid_B * BLOCK_B + tl.arange(0, BLOCK_B)
     offs_BR = pid_BR * BLOCK_BRANCHES + tl.arange(0, BLOCK_BRANCHES)
-    b_mask  = offs_B < B
+    b_mask = offs_B < B
 
-    csr_row_ptrs, n_children = _load_csr_state(offs_B, b_mask, cur_node_ptr, csr_trie_row_ptr)
+    csr_row_ptrs, n_children = _load_csr_state(
+        offs_B, b_mask, cur_node_ptr, csr_trie_row_ptr
+    )
 
     branch_cols, branch_vals, branch_valid, logits = _compute_branch_logits(
-        offs_B, offs_BR, b_mask, csr_row_ptrs, n_children,
-        a_ptr, b_ptr, bias_ptr, csr_trie_cols_vals_ptr,
-        a_stride_B, a_stride_K, b_stride_K, b_stride_N, cols_vals_stride_0,
-        max_branches, K, BLOCK_B, BLOCK_K, BLOCK_BRANCHES, HAS_BIAS,
+        offs_B,
+        offs_BR,
+        b_mask,
+        csr_row_ptrs,
+        n_children,
+        a_ptr,
+        b_ptr,
+        bias_ptr,
+        csr_trie_cols_vals_ptr,
+        a_stride_B,
+        a_stride_K,
+        b_stride_K,
+        b_stride_N,
+        cols_vals_stride_0,
+        max_branches,
+        K,
+        BLOCK_B,
+        BLOCK_K,
+        BLOCK_BRANCHES,
+        HAS_BIAS,
     )
 
     for local_br in tl.static_range(BLOCK_BRANCHES):
         branch_idx = pid_BR * BLOCK_BRANCHES + local_br
-        in_range   = branch_idx < max_branches
+        in_range = branch_idx < max_branches
         col_k, val_k, c_mask, logit_k = _extract_branch(
-            local_br, branch_cols, branch_vals, branch_valid, logits, BLOCK_BRANCHES,
+            local_br,
+            branch_cols,
+            branch_vals,
+            branch_valid,
+            logits,
+            BLOCK_BRANCHES,
         )
         tl.store(
             corrected_logits_ptr
@@ -510,9 +539,18 @@ def _fused_sparse_linear_constrained_node_transition_kernel(
             mask=c_mask,
         )
         _store_branch_outputs(
-            offs_B, b_mask, in_range, branch_idx, col_k, val_k,
-            next_node_ptr, next_node_stride_B, next_node_stride_N,
-            valid_idxs_ptr, valid_idxs_stride_B, valid_idxs_stride_N,
+            offs_B,
+            b_mask,
+            in_range,
+            branch_idx,
+            col_k,
+            val_k,
+            next_node_ptr,
+            next_node_stride_B,
+            next_node_stride_N,
+            valid_idxs_ptr,
+            valid_idxs_stride_B,
+            valid_idxs_stride_N,
         )
 
 
@@ -644,41 +682,80 @@ def _fused_sparse_linear_constrained_node_transition_sampling_kernel(
     max_branches,
     HAS_BIAS: tl.constexpr,
 ):
-    pid_B  = tl.program_id(axis=0)
+    pid_B = tl.program_id(axis=0)
     pid_BR = tl.program_id(axis=1)
 
-    offs_B  = pid_B  * BLOCK_B  + tl.arange(0, BLOCK_B)
+    offs_B = pid_B * BLOCK_B + tl.arange(0, BLOCK_B)
     offs_BR = pid_BR * BLOCK_BRANCHES + tl.arange(0, BLOCK_BRANCHES)
-    b_mask  = offs_B < B
+    b_mask = offs_B < B
 
-    csr_row_ptrs, n_children = _load_csr_state(offs_B, b_mask, cur_node_ptr, csr_trie_row_ptr)
-
-    branch_cols, branch_vals, branch_valid, logits = _compute_branch_logits(
-        offs_B, offs_BR, b_mask, csr_row_ptrs, n_children,
-        a_ptr, b_ptr, bias_ptr, csr_trie_cols_vals_ptr,
-        a_stride_B, a_stride_K, b_stride_K, b_stride_N, cols_vals_stride_0,
-        max_branches, K, BLOCK_B, BLOCK_K, BLOCK_BRANCHES, HAS_BIAS,
+    csr_row_ptrs, n_children = _load_csr_state(
+        offs_B, b_mask, cur_node_ptr, csr_trie_row_ptr
     )
 
-    temperature      = tl.load(temperature_ptr)
+    branch_cols, branch_vals, branch_valid, logits = _compute_branch_logits(
+        offs_B,
+        offs_BR,
+        b_mask,
+        csr_row_ptrs,
+        n_children,
+        a_ptr,
+        b_ptr,
+        bias_ptr,
+        csr_trie_cols_vals_ptr,
+        a_stride_B,
+        a_stride_K,
+        b_stride_K,
+        b_stride_N,
+        cols_vals_stride_0,
+        max_branches,
+        K,
+        BLOCK_B,
+        BLOCK_K,
+        BLOCK_BRANCHES,
+        HAS_BIAS,
+    )
+
+    temperature = tl.load(temperature_ptr)
     block_max_gumbel = tl.full((BLOCK_B,), float("-inf"), dtype=tl.float32)
-    block_sample     = tl.full((BLOCK_B,), -1.0, dtype=tl.float32)
+    block_sample = tl.full((BLOCK_B,), -1.0, dtype=tl.float32)
 
     for local_br in tl.static_range(BLOCK_BRANCHES):
         branch_idx = pid_BR * BLOCK_BRANCHES + local_br
-        in_range   = branch_idx < max_branches
+        in_range = branch_idx < max_branches
         col_k, val_k, c_mask, logit_k = _extract_branch(
-            local_br, branch_cols, branch_vals, branch_valid, logits, BLOCK_BRANCHES,
+            local_br,
+            branch_cols,
+            branch_vals,
+            branch_valid,
+            logits,
+            BLOCK_BRANCHES,
         )
         _store_branch_outputs(
-            offs_B, b_mask, in_range, branch_idx, col_k, val_k,
-            next_node_ptr, next_node_stride_B, next_node_stride_N,
-            valid_idxs_ptr, valid_idxs_stride_B, valid_idxs_stride_N,
+            offs_B,
+            b_mask,
+            in_range,
+            branch_idx,
+            col_k,
+            val_k,
+            next_node_ptr,
+            next_node_stride_B,
+            next_node_stride_N,
+            valid_idxs_ptr,
+            valid_idxs_stride_B,
+            valid_idxs_stride_N,
         )
         block_sample, block_max_gumbel = _gumbel_max_update(
-            rng_seed, offs_B, max_branches, branch_idx,
-            logit_k, temperature, c_mask, col_k,
-            block_sample, block_max_gumbel,
+            rng_seed,
+            offs_B,
+            max_branches,
+            branch_idx,
+            logit_k,
+            temperature,
+            c_mask,
+            col_k,
+            block_sample,
+            block_max_gumbel,
         )
 
     # Cross-block Gumbel-max reduction: spinlock protects per-batch-block update.
@@ -736,10 +813,10 @@ def _fused_linear_constrained_node_transition_topk_op(
 
     next_node = cur_node.new_full((B, max_branches), -1)
     valid_idxs = cur_node.new_full((B, max_branches), -1)
-    topk_logits = torch.full((B, k), float("-inf"), dtype=torch.float32, device=a.device)
-    topk_idxs = torch.full((B, k), -1, dtype=torch.int64, device=a.device)
-    num_locks = triton.cdiv(B, 16)
-    locks = torch.zeros(num_locks, dtype=torch.int32, device=a.device)
+    # Pass 1: compute per-branch logits into a [B, max_branches] scratch buffer.
+    branch_logits = torch.full(
+        (B, max_branches), float("-inf"), dtype=torch.float32, device=a.device
+    )
 
     grid = lambda meta: (
         triton.cdiv(B, meta["BLOCK_B"]),
@@ -752,8 +829,6 @@ def _fused_linear_constrained_node_transition_topk_op(
         cur_node_ptr=cur_node,
         csr_trie_row_ptr=csr_row_ptrs,
         csr_trie_cols_vals_ptr=csr_cols_vals,
-        locks_ptr=locks,
-        num_locks=num_locks,
         a_stride_B=a.stride(0),
         a_stride_K=a.stride(1),
         b_stride_K=b.stride(0),
@@ -761,31 +836,27 @@ def _fused_linear_constrained_node_transition_topk_op(
         cols_vals_stride_0=csr_cols_vals.stride(0),
         next_node_ptr=next_node,
         valid_idxs_ptr=valid_idxs,
-        topk_logits_ptr=topk_logits,
-        topk_idxs_ptr=topk_idxs,
+        branch_logits_ptr=branch_logits,
         next_node_stride_B=next_node.stride(0),
         next_node_stride_N=next_node.stride(1),
         valid_idxs_stride_B=valid_idxs.stride(0),
         valid_idxs_stride_N=valid_idxs.stride(1),
         B=B,
         K=K,
-        K_TOP=k,
         max_branches=max_branches,
         HAS_BIAS=has_bias,
     )
+
+    # Pass 2: topk on the small [B, max_branches] buffer — no serialization.
+    topk_logits, topk_branch_idxs = torch.topk(branch_logits, k, dim=-1)
+    topk_idxs = valid_idxs.gather(1, topk_branch_idxs)
     return next_node, valid_idxs, topk_logits, topk_idxs
 
 
 @triton.autotune(
     configs=_FUSED_AUTOTUNE_CONFIGS,
-    key=["B", "K", "K_TOP"],
-    restore_value=[
-        "next_node_ptr",
-        "valid_idxs_ptr",
-        "topk_logits_ptr",
-        "topk_idxs_ptr",
-        "locks_ptr",
-    ],
+    key=["B", "K"],
+    restore_value=["next_node_ptr", "valid_idxs_ptr", "branch_logits_ptr"],
 )
 @triton.jit
 def _fused_sparse_linear_constrained_node_transition_topk_kernel(
@@ -796,8 +867,6 @@ def _fused_sparse_linear_constrained_node_transition_topk_kernel(
     cur_node_ptr,
     csr_trie_row_ptr,
     csr_trie_cols_vals_ptr,
-    locks_ptr,
-    num_locks,
     a_stride_B,
     a_stride_K,
     b_stride_K,
@@ -806,8 +875,7 @@ def _fused_sparse_linear_constrained_node_transition_topk_kernel(
     # Outputs
     next_node_ptr,
     valid_idxs_ptr,
-    topk_logits_ptr,
-    topk_idxs_ptr,
+    branch_logits_ptr,
     next_node_stride_B,
     next_node_stride_N,
     valid_idxs_stride_B,
@@ -815,78 +883,74 @@ def _fused_sparse_linear_constrained_node_transition_topk_kernel(
     # Constants
     B: tl.constexpr,
     K: tl.constexpr,
-    K_TOP: tl.constexpr,
     BLOCK_B: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_BRANCHES: tl.constexpr,
     max_branches,
     HAS_BIAS: tl.constexpr,
 ):
-    pid_B  = tl.program_id(axis=0)
+    pid_B = tl.program_id(axis=0)
     pid_BR = tl.program_id(axis=1)
 
-    offs_B  = pid_B  * BLOCK_B  + tl.arange(0, BLOCK_B)
+    offs_B = pid_B * BLOCK_B + tl.arange(0, BLOCK_B)
     offs_BR = pid_BR * BLOCK_BRANCHES + tl.arange(0, BLOCK_BRANCHES)
-    b_mask  = offs_B < B
+    b_mask = offs_B < B
 
-    csr_row_ptrs, n_children = _load_csr_state(offs_B, b_mask, cur_node_ptr, csr_trie_row_ptr)
-
-    branch_cols, branch_vals, branch_valid, logits = _compute_branch_logits(
-        offs_B, offs_BR, b_mask, csr_row_ptrs, n_children,
-        a_ptr, b_ptr, bias_ptr, csr_trie_cols_vals_ptr,
-        a_stride_B, a_stride_K, b_stride_K, b_stride_N, cols_vals_stride_0,
-        max_branches, K, BLOCK_B, BLOCK_K, BLOCK_BRANCHES, HAS_BIAS,
+    csr_row_ptrs, n_children = _load_csr_state(
+        offs_B, b_mask, cur_node_ptr, csr_trie_row_ptr
     )
 
-    # Spinlock pointer for this batch block — shared across all pid_BR blocks.
-    lock_ptr = locks_ptr + pid_B // tl.cdiv(B, BLOCK_B * num_locks)
+    branch_cols, branch_vals, branch_valid, logits = _compute_branch_logits(
+        offs_B,
+        offs_BR,
+        b_mask,
+        csr_row_ptrs,
+        n_children,
+        a_ptr,
+        b_ptr,
+        bias_ptr,
+        csr_trie_cols_vals_ptr,
+        a_stride_B,
+        a_stride_K,
+        b_stride_K,
+        b_stride_N,
+        cols_vals_stride_0,
+        max_branches,
+        K,
+        BLOCK_B,
+        BLOCK_K,
+        BLOCK_BRANCHES,
+        HAS_BIAS,
+    )
 
-    # Phase 1: write next_node / valid_idxs — each (batch, branch_idx) address is
-    # unique across blocks, so no lock is needed here.
+    # Each (batch, branch_idx) address is unique across blocks — no lock needed.
     for local_br in tl.static_range(BLOCK_BRANCHES):
         branch_idx = pid_BR * BLOCK_BRANCHES + local_br
-        in_range   = branch_idx < max_branches
+        in_range = branch_idx < max_branches
         col_k, val_k, c_mask, logit_k = _extract_branch(
-            local_br, branch_cols, branch_vals, branch_valid, logits, BLOCK_BRANCHES,
+            local_br,
+            branch_cols,
+            branch_vals,
+            branch_valid,
+            logits,
+            BLOCK_BRANCHES,
         )
         _store_branch_outputs(
-            offs_B, b_mask, in_range, branch_idx, col_k, val_k,
-            next_node_ptr, next_node_stride_B, next_node_stride_N,
-            valid_idxs_ptr, valid_idxs_stride_B, valid_idxs_stride_N,
+            offs_B,
+            b_mask,
+            in_range,
+            branch_idx,
+            col_k,
+            val_k,
+            next_node_ptr,
+            next_node_stride_B,
+            next_node_stride_N,
+            valid_idxs_ptr,
+            valid_idxs_stride_B,
+            valid_idxs_stride_N,
         )
-
-    # Phase 2: merge all BLOCK_BRANCHES candidates into the global top-k under a
-    # single lock acquisition instead of one per branch.
-    while tl.atomic_cas(lock_ptr, 0, 1) == 1:
-        pass
-
-    # Insertion sort: each slot stores the larger of (cur, slot); the smaller
-    # value propagates forward. All K_TOP iterations unroll at trace time.
-    for local_br in tl.static_range(BLOCK_BRANCHES):
-        branch_idx = pid_BR * BLOCK_BRANCHES + local_br
-        in_range   = branch_idx < max_branches
-        col_k, val_k, c_mask, logit_k = _extract_branch(
-            local_br, branch_cols, branch_vals, branch_valid, logits, BLOCK_BRANCHES,
+        tl.store(
+            branch_logits_ptr + offs_B * max_branches + branch_idx,
+            tl.where(c_mask, logit_k, float("-inf")),
+            mask=b_mask & in_range,
         )
-        cur_l = tl.where(c_mask, logit_k, float("-inf"))
-        cur_i = col_k.to(tl.int64)
-
-        for slot in range(K_TOP):
-            global_l = tl.load(
-                topk_logits_ptr + offs_B * K_TOP + slot,
-                mask=b_mask,
-                other=float("-inf"),
-            )
-            global_i = tl.load(
-                topk_idxs_ptr + offs_B * K_TOP + slot,
-                mask=b_mask,
-                other=-1,
-            )
-            new_slot_l, new_slot_i, cur_l, cur_i = _bitonic_compare_swap(
-                cur_l, cur_i, global_l, global_i
-            )
-            tl.store(topk_logits_ptr + offs_B * K_TOP + slot, new_slot_l, mask=b_mask)
-            tl.store(topk_idxs_ptr + offs_B * K_TOP + slot, new_slot_i, mask=b_mask)
-
-    tl.debug_barrier()
-    tl.atomic_xchg(lock_ptr, 0)
