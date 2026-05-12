@@ -1,4 +1,5 @@
 import torch
+from contextlib import contextmanager
 from rectokens.ops.constrained_node_transition import (
     fused_linear_constrained_node_transition,
 )
@@ -15,11 +16,13 @@ class SparseLinear(nn.Module):
         self.next_nodes: Optional[torch.Tensor] = None
         self.valid_idxs: Optional[torch.Tensor] = None
 
-    def set_context(self, constraint_state) -> None:
+    @contextmanager
+    def constrained(self, constraint_state: ConstraintState):
         self._ctx = constraint_state
-
-    def clear_context(self) -> None:
-        self._ctx = None
+        try:
+            yield
+        finally:
+            self._ctx = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         assert x.ndim == 2, "Fused kernel does not support dim > 2"

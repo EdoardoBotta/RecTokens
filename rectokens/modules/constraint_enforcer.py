@@ -1,4 +1,6 @@
+from contextlib import contextmanager
 from rectokens.modules.sparse_linear import SparseLinear
+from rectokens.schemas.state import ConstraintState
 from typing import Optional
 from torch import nn
 
@@ -59,6 +61,14 @@ class ConstraintEnforcer(nn.Module):
         """Replace the output projection in `model` with a SparseLinear in-place."""
         self.constrained_linear = self.convert_to_sparse_linear(model, self.attr_path)
         return model
+
+    @contextmanager
+    def constrained(self, constraint_state: ConstraintState):
+        """Context manager that scopes constraint enforcement to one forward pass."""
+        if self.constrained_linear is None:
+            raise RuntimeError("Call .prepare(model) before using .constrained()")
+        with self.constrained_linear.constrained(constraint_state):
+            yield
 
     def forward(self, *args, **kwargs):
         raise NotImplementedError(

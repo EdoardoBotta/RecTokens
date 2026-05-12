@@ -1,3 +1,4 @@
+import contextlib
 import torch
 import torch.nn.functional as F
 from rectokens.schemas.compact_csr_trie import CompactCSRTrie
@@ -221,20 +222,21 @@ def decode_one_step(
         else None
     )
 
-    if constrained_linear is not None and step >= len(trie.dense_mask_by_layer):
-        constrained_linear.set_context(constrained_generation_state.constraint_state)
-
-    model_output = model_fwd(
-        input_ids,
-        past_key_values=past_key_values,
-        attention_mask=attention_mask,
-        use_cache=True,
+    use_constrained = constrained_linear is not None and step >= len(trie.dense_mask_by_layer)
+    ctx = (
+        constrained_linear.constrained(constrained_generation_state.constraint_state)
+        if use_constrained
+        else contextlib.nullcontext()
     )
+    with ctx:
+        model_output = model_fwd(
+            input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            use_cache=True,
+        )
     logits = model_output.logits[:, -1, :]  # (B, vocab_size)
     new_past_kv = model_output.past_key_values
-
-    if constrained_linear is not None:
-        constrained_linear.clear_context()
 
     assert logits.ndim == 2  # (B or B*k, vocab_size)
 
