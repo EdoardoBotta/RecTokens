@@ -385,7 +385,7 @@ rectokens/
 ├── schemas/            # CompactCSRTrie, GenerationConfig, GenerationState
 ├── ops/                # Python wrappers for kernels
 ├── kernels/            # Triton GPU kernels
-├── modules/            # SparseLinear, ConstraintEnforcer (PyTorch modules)
+├── modules/            # SparseLinear, ConstraintEnforcer (abstract), SparseTrieConstraintEnforcer
 └── integrations/
     └── hf/             # ItemAwareTokenizer, InterleavedSequenceCollator,
                         # PrecomputedSequenceCollator, ItemAwareCausalLM
