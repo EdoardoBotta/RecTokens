@@ -1,11 +1,32 @@
-from contextlib import contextmanager
+from abc import ABC, abstractmethod
+from contextlib import AbstractContextManager, contextmanager
 from rectokens.modules.sparse_linear import SparseLinear
 from rectokens.schemas.state import ConstraintState
 from typing import Literal, Optional
 from torch import nn
 
 
-class ConstraintEnforcer(nn.Module):
+class ConstraintEnforcer(ABC, nn.Module):
+    @abstractmethod
+    def prepare(self, model: nn.Module) -> nn.Module:
+        """Modify `model` in-place to enable constraint enforcement."""
+        ...
+
+    @abstractmethod
+    def constrained(
+        self, constraint_state: ConstraintState, **kwargs
+    ) -> AbstractContextManager:
+        """Context manager that scopes constraint enforcement to one forward pass."""
+        ...
+
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError(
+            "ConstraintEnforcer is not a forward model; call .prepare() to prepare a model "
+            "then pass it to autoregressive_generate."
+        )
+
+
+class SparseTrieConstraintEnforcer(ConstraintEnforcer):
     """
     Wraps a model and replaces its output projection with a SparseLinear.
 
@@ -82,9 +103,3 @@ class ConstraintEnforcer(nn.Module):
             rng_seed=rng_seed,
         ):
             yield
-
-    def forward(self, *args, **kwargs):
-        raise NotImplementedError(
-            "ConstraintEnforcer is not a forward model; call .prepare() to prepare a model "
-            "then pass it to autoregressive_generate."
-        )

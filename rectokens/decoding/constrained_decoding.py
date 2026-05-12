@@ -8,7 +8,7 @@ from rectokens.schemas.state import ConstraintState
 from rectokens.schemas.state import GenerationState
 from rectokens.ops.constrained_node_transition import constrained_node_transition
 from rectokens.modules.sparse_linear import SparseLinear
-from rectokens.modules.constraint_enforcer import ConstraintEnforcer
+from rectokens.modules.constraint_enforcer import SparseTrieConstraintEnforcer
 from typing import Optional
 from torch import nn
 
@@ -157,7 +157,7 @@ def autoregressive_generate(
         generated_ids: (B, k, seq_len) tensor of generated token ids.
     """
     if attr_path is not None:
-        ConstraintEnforcer(attr_path).prepare(model)
+        SparseTrieConstraintEnforcer(attr_path).prepare(model)
 
     state = ConstrainedGenerationState(
         generation_config=generation_config,
