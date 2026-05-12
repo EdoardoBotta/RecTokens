@@ -31,8 +31,18 @@ K_TOP = 50
 WARMUP = 25
 REP = 100
 
-ALL_ALGORITHMS = ["fused_sample", "sparse_pytorch_sample", "fused_topk", "sparse_pytorch_topk"]
-DEFAULT_ALGORITHMS = ["fused_sample", "sparse_pytorch_sample", "fused_topk", "sparse_pytorch_topk"]
+ALL_ALGORITHMS = [
+    "fused_sample",
+    "sparse_pytorch_sample",
+    "fused_topk",
+    "sparse_pytorch_topk",
+]
+DEFAULT_ALGORITHMS = [
+    "fused_sample",
+    "sparse_pytorch_sample",
+    "fused_topk",
+    "sparse_pytorch_topk",
+]
 DEFAULT_SPARSITY = 0.01
 
 
@@ -78,6 +88,7 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top):
                 sparse_linear_pytorch_compiled = torch.compile(sparse_linear_pytorch)
 
             if "sparse_pytorch_sample" in alg_set:
+
                 def sparse_pytorch_with_sample():
                     _, _, corrected_logits = sparse_linear_pytorch_compiled(
                         a, weight, cur_node, csr, step=0
@@ -86,6 +97,7 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top):
                     return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
             if "sparse_pytorch_topk" in alg_set:
+
                 def sparse_pytorch_with_topk():
                     _, _, corrected_logits = sparse_linear_pytorch_compiled(
                         a, weight, cur_node, csr, step=0
@@ -199,7 +211,11 @@ if __name__ == "__main__":
     print(f"N_vals={N_vals}\n")
 
     df = benchmark_grid(
-        B_vals, N_vals, algorithms=args.algorithms, sparsity=args.sparsity, k_top=args.topk
+        B_vals,
+        N_vals,
+        algorithms=args.algorithms,
+        sparsity=args.sparsity,
+        k_top=args.topk,
     )
     csv_path = "out/bench_fused_sample.csv"
     df.to_csv(csv_path, index=False)

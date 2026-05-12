@@ -56,25 +56,43 @@ class SparseLinear(nn.Module):
         w, bias = self.base_linear.weight, self.base_linear.bias
 
         if self._strategy == "sample":
-            next_nodes, valid_idxs, sample = fused_linear_constrained_node_transition_sampling(
-                x, w, self._ctx, bias=bias,
-                temperature=self._temperature,
-                rng_seed=self._rng_seed,
+            next_nodes, valid_idxs, sample = (
+                fused_linear_constrained_node_transition_sampling(
+                    x,
+                    w,
+                    self._ctx,
+                    bias=bias,
+                    temperature=self._temperature,
+                    rng_seed=self._rng_seed,
+                )
             )
-            self.next_nodes, self.valid_idxs, self.sample = next_nodes, valid_idxs, sample
+            self.next_nodes, self.valid_idxs, self.sample = (
+                next_nodes,
+                valid_idxs,
+                sample,
+            )
             # Return zeros — decode_one_step uses self.sample directly.
             return x.new_zeros(x.shape[0], w.shape[0])
 
         if self._strategy == "topk":
-            next_nodes, valid_idxs, topk_logits, topk_idxs = fused_linear_constrained_node_transition_topk(
-                x, w, self._ctx, self._k, bias=bias,
+            next_nodes, valid_idxs, topk_logits, topk_idxs = (
+                fused_linear_constrained_node_transition_topk(
+                    x,
+                    w,
+                    self._ctx,
+                    self._k,
+                    bias=bias,
+                )
             )
             self.next_nodes, self.valid_idxs = next_nodes, valid_idxs
             self.topk_logits, self.topk_idxs = topk_logits, topk_idxs
             return topk_logits  # (B, k)
 
         next_nodes, valid_idxs, logits = fused_linear_constrained_node_transition(
-            x, w, self._ctx, bias=bias,
+            x,
+            w,
+            self._ctx,
+            bias=bias,
         )
         self.next_nodes, self.valid_idxs = next_nodes, valid_idxs
         return logits

@@ -222,7 +222,9 @@ def decode_one_step(
         else None
     )
 
-    use_constrained = constrained_linear is not None and step >= len(trie.dense_mask_by_layer)
+    use_constrained = constrained_linear is not None and step >= len(
+        trie.dense_mask_by_layer
+    )
     ctx = (
         constrained_linear.constrained(
             constrained_generation_state.constraint_state,
@@ -285,7 +287,9 @@ def decode_one_step(
     elif use_constrained and constrained_linear.topk_idxs is not None:
         # Fused top-k kernel returned the beam_size best token IDs and their logits.
         # logits here is (B, beam_size) from SparseLinear.forward.
-        samples_batched = constrained_linear.topk_idxs  # (B, beam_size) actual token IDs
+        samples_batched = (
+            constrained_linear.topk_idxs
+        )  # (B, beam_size) actual token IDs
         sampled_log_probas = F.log_softmax(logits, dim=-1)  # (B, beam_size)
     elif config.temperature == 0.0:
         # Greedy top-k: take the beam_size highest-logit tokens directly.

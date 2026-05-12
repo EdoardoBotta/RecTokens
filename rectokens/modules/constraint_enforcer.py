@@ -75,7 +75,11 @@ class ConstraintEnforcer(nn.Module):
         if self.constrained_linear is None:
             raise RuntimeError("Call .prepare(model) before using .constrained()")
         with self.constrained_linear.constrained(
-            constraint_state, strategy=strategy, temperature=temperature, k=k, rng_seed=rng_seed
+            constraint_state,
+            strategy=strategy,
+            temperature=temperature,
+            k=k,
+            rng_seed=rng_seed,
         ):
             yield
 
