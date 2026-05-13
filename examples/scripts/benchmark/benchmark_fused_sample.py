@@ -197,6 +197,12 @@ if __name__ == "__main__":
         default=K_TOP,
         help="k for top-k benchmarks (default: %(default)s)",
     )
+    parser.add_argument(
+        "--tag",
+        type=str,
+        default=None,
+        help="Tag appended to output filenames (e.g. --tag=before / --tag=after)",
+    )
     args = parser.parse_args()
 
     assert torch.cuda.is_available(), "CUDA required"
@@ -217,7 +223,8 @@ if __name__ == "__main__":
         sparsity=args.sparsity,
         k_top=args.topk,
     )
-    csv_path = "out/bench_fused_sample.csv"
+    suffix = f"_{args.tag}" if args.tag else ""
+    csv_path = f"out/bench_fused_sample{suffix}.csv"
     df.to_csv(csv_path, index=False)
     print(f"\nSaved {csv_path}\n")
 
@@ -228,7 +235,7 @@ if __name__ == "__main__":
             df,
             value_col="speedup_fused_vs_sparse_pytorch_sample",
             title=f"Fused sample speedup vs compile(sparse_linear_pytorch)+multinomial  (K={K})",
-            filename="out/heatmap_fused_sample_vs_sparse_pytorch.jpg",
+            filename=f"out/heatmap_fused_sample_vs_sparse_pytorch{suffix}.jpg",
             cbar_label="Speedup (>1 = fused faster)",
         )
     if "speedup_fused_topk_vs_sparse_pytorch_topk" in df.columns:
@@ -236,6 +243,6 @@ if __name__ == "__main__":
             df,
             value_col="speedup_fused_topk_vs_sparse_pytorch_topk",
             title=f"Fused top-k speedup vs compile(sparse_linear_pytorch)+topk  (K={K}, k={args.topk})",
-            filename="out/heatmap_fused_topk_vs_sparse_pytorch_topk.jpg",
+            filename=f"out/heatmap_fused_topk_vs_sparse_pytorch_topk{suffix}.jpg",
             cbar_label="Speedup (>1 = fused faster)",
         )

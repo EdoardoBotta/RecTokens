@@ -63,11 +63,16 @@ def _constrained_node_transition_op(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_B": 32, "BLOCK_N": 128, "GROUP_SIZE_M": 4}),
-        triton.Config({"BLOCK_B": 64, "BLOCK_N": 64, "GROUP_SIZE_M": 4}),
-        triton.Config({"BLOCK_B": 64, "BLOCK_N": 128, "GROUP_SIZE_M": 4}),
-        triton.Config({"BLOCK_B": 128, "BLOCK_N": 64, "GROUP_SIZE_M": 4}),
-        triton.Config({"BLOCK_B": 128, "BLOCK_N": 128, "GROUP_SIZE_M": 8}),
+        triton.Config({"BLOCK_B": 32, "BLOCK_N": 128, "GROUP_SIZE_M": 4}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_B": 64, "BLOCK_N": 64, "GROUP_SIZE_M": 4}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_B": 64, "BLOCK_N": 128, "GROUP_SIZE_M": 4}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_B": 128, "BLOCK_N": 64, "GROUP_SIZE_M": 4}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_B": 128, "BLOCK_N": 128, "GROUP_SIZE_M": 8}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_B": 16, "BLOCK_N": 128, "GROUP_SIZE_M": 4}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_B": 32, "BLOCK_N": 256, "GROUP_SIZE_M": 4}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_B": 64, "BLOCK_N": 256, "GROUP_SIZE_M": 4}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_B": 64, "BLOCK_N": 64, "GROUP_SIZE_M": 4}, num_warps=2, num_stages=3),
+        triton.Config({"BLOCK_B": 128, "BLOCK_N": 256, "GROUP_SIZE_M": 8}, num_warps=8, num_stages=4),
     ],
     key=["B", "N"],
     restore_value=["corrected_logits_ptr", "next_node_ptr", "valid_idxs_ptr"],
@@ -177,13 +182,29 @@ def _constrained_node_transition_kernel(
 
 
 _FUSED_AUTOTUNE_CONFIGS = [
-    triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
-    triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
-    triton.Config({"BLOCK_B": 256, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
-    triton.Config({"BLOCK_B": 64, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}),
-    triton.Config({"BLOCK_B": 128, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}),
-    triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
-    triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
+    # ── original block shapes with explicit warp / pipeline tuning ──
+    triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_B": 256, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}, num_warps=8, num_stages=2),
+    triton.Config({"BLOCK_B": 64, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}, num_warps=4, num_stages=3),
+    triton.Config({"BLOCK_B": 128, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}, num_warps=8, num_stages=3),
+    triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}, num_warps=8, num_stages=2),
+    # ── small-batch configs ──
+    triton.Config({"BLOCK_B": 32, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}, num_warps=2, num_stages=2),
+    triton.Config({"BLOCK_B": 32, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}, num_warps=4, num_stages=3),
+    # ── larger K-tiles for better compute-to-load ratio ──
+    triton.Config({"BLOCK_B": 64, "BLOCK_K": 256, "BLOCK_BRANCHES": 4}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_B": 128, "BLOCK_K": 256, "BLOCK_BRANCHES": 4}, num_warps=8, num_stages=4),
+    # ── wider batch with medium K ──
+    triton.Config({"BLOCK_B": 256, "BLOCK_K": 128, "BLOCK_BRANCHES": 4}, num_warps=8, num_stages=3),
+    triton.Config({"BLOCK_B": 64, "BLOCK_K": 128, "BLOCK_BRANCHES": 4}, num_warps=4, num_stages=3),
+    # ── high-branch configs for wide trie fan-out / reduced branch-block contention ──
+    triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 32}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 32}, num_warps=8, num_stages=2),
+    # ── extra pipeline depth ──
+    triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 8}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_B": 128, "BLOCK_K": 128, "BLOCK_BRANCHES": 4}, num_warps=4, num_stages=4),
 ]
 
 
@@ -343,7 +364,7 @@ def _compute_branch_logits(
                 other=0.0,
             )  # [BLOCK_B, BLOCK_K]
             dot = tl.sum(a_chunk * b_chunk, axis=1)  # [BLOCK_B]
-            logits = tl.where(br_sel[None, :], logits + dot[:, None], logits)
+            logits += tl.where(br_sel[None, :], dot[:, None], 0.0)
 
     if HAS_BIAS:
         for local_br in tl.static_range(BLOCK_BRANCHES):
@@ -351,7 +372,7 @@ def _compute_branch_logits(
                 local_br, branch_cols, branch_valid, BLOCK_BRANCHES
             )
             bias_k = tl.load(bias_ptr + col_k, mask=c_mask, other=0.0)
-            logits = tl.where(br_sel[None, :], logits + bias_k[:, None], logits)
+            logits += tl.where(br_sel[None, :], bias_k[:, None], 0.0)
 
     return branch_cols, branch_vals, branch_valid, logits
 
