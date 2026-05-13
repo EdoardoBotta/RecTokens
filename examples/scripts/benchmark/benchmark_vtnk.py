@@ -235,6 +235,12 @@ if __name__ == "__main__":
         default=DEFAULT_SPARSITY,
         help="Fraction of vocab used as max branches (default: %(default)s)",
     )
+    parser.add_argument(
+        "--tag",
+        type=str,
+        default=None,
+        help="Tag appended to output filenames (e.g. --tag=before / --tag=after)",
+    )
     args = parser.parse_args()
 
     assert torch.cuda.is_available(), "CUDA required"
@@ -251,7 +257,8 @@ if __name__ == "__main__":
     df = benchmark_grid(
         B_vals, N_vals, algorithms=args.algorithms, sparsity=args.sparsity
     )
-    csv_path = "out/bench_vtnk.csv"
+    suffix = f"_{args.tag}" if args.tag else ""
+    csv_path = f"out/bench_vtnk{suffix}.csv"
     df.to_csv(csv_path, index=False)
     print(f"\nSaved {csv_path}\n")
 
@@ -262,7 +269,7 @@ if __name__ == "__main__":
             df,
             value_col="speedup_fused_vs_kernel",
             title=f"Fused speedup vs compiled_linear+constrained_kernel  (K={K})",
-            filename="out/heatmap_fused_vs_kernel.jpg",
+            filename=f"out/heatmap_fused_vs_kernel{suffix}.jpg",
             cbar_label="Speedup (>1 = fused faster)",
         )
     if "speedup_fused_vs_pytorch" in df.columns:
@@ -270,7 +277,7 @@ if __name__ == "__main__":
             df,
             value_col="speedup_fused_vs_pytorch",
             title=f"Fused speedup vs compiled_linear+vtnk_pytorch  (K={K})",
-            filename="out/heatmap_fused_vs_pytorch.jpg",
+            filename=f"out/heatmap_fused_vs_pytorch{suffix}.jpg",
             cbar_label="Speedup (>1 = fused faster)",
         )
     if "speedup_fused_vs_sparse_pytorch" in df.columns:
@@ -278,7 +285,7 @@ if __name__ == "__main__":
             df,
             value_col="speedup_fused_vs_sparse_pytorch",
             title=f"Fused speedup vs sparse_linear_pytorch  (K={K})",
-            filename="out/heatmap_fused_vs_sparse_pytorch.jpg",
+            filename=f"out/heatmap_fused_vs_sparse_pytorch{suffix}.jpg",
             cbar_label="Speedup (>1 = fused faster)",
         )
     if "speedup_fused_vs_trie_cpu" in df.columns:
@@ -286,6 +293,6 @@ if __name__ == "__main__":
             df,
             value_col="speedup_fused_vs_trie_cpu",
             title=f"Fused speedup vs CPU trie traversal  (K={K})",
-            filename="out/heatmap_fused_vs_trie_cpu.jpg",
+            filename=f"out/heatmap_fused_vs_trie_cpu{suffix}.jpg",
             cbar_label="Speedup (>1 = fused faster)",
         )
