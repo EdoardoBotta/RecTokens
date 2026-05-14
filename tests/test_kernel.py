@@ -10,9 +10,11 @@ if not torch.cuda.is_available():
 from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 from rectokens.decoding.vntk import vtnk_pytorch
 from rectokens.ops.constrained_node_transition import (
+    CUTE_DSL_AVAILABLE,
     constrained_node_transition,
     fused_linear_constrained_node_transition,
     fused_linear_constrained_node_transition_topk,
+    fused_linear_constrained_node_transition_topk_cute,
 )
 from rectokens.schemas.state import ConstraintState
 
@@ -264,3 +266,90 @@ class TestKernel(unittest.TestCase):
 
     def test_fused_topk_k3_b8_large_k(self) -> None:
         self._assert_fused_topk(8, 128, 0, [0] * 8, k=2)
+
+
+# ---------------------------------------------------------------------------
+# CuTe DSL fused top-K kernel — mirrors the Triton top-K tests above
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(CUTE_DSL_AVAILABLE, "nvidia-cutlass-dsl not installed")
+class TestCuteKernel(unittest.TestCase):
+    """Tests for the CuTe DSL reimplementation of the fused top-K kernel."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        seqs_small = [[1, 2, 1], [3, 1, 2], [3, 1, 3]]
+        csr = CompactCSRTrie.from_sorted_batch(
+            lex_sort(seqs_small), vocab_size=VOCAB_SIZE
+        )
+        cls.csr_small = csr._replace(
+            row_ptrs=csr.row_ptrs.to(DEVICE),
+            stacked_cols_vals=csr.stacked_cols_vals.to(DEVICE),
+            dense_mask_by_layer=[v.to(DEVICE) for v in csr.dense_mask_by_layer],
+            dense_states=csr.dense_states.to(DEVICE),
+        )
+
+        seqs_dense = [[i, j, k] for i in range(4) for j in range(4) for k in range(4)]
+        csr2 = CompactCSRTrie.from_sorted_batch(lex_sort(seqs_dense), vocab_size=16)
+        cls.csr_dense = csr2._replace(
+            row_ptrs=csr2.row_ptrs.to(DEVICE),
+            stacked_cols_vals=csr2.stacked_cols_vals.to(DEVICE),
+            dense_mask_by_layer=[v.to(DEVICE) for v in csr2.dense_mask_by_layer],
+            dense_states=csr2.dense_states.to(DEVICE),
+        )
+
+    def _assert_fused_topk_cute(
+        self, B: int, K: int, step: int, cur_node_vals: list[int], k: int
+    ) -> None:
+        torch.manual_seed(99)
+        a = torch.randn(B, K, device=DEVICE)
+        b = torch.randn(K, VOCAB_SIZE, device=DEVICE)
+        cur_node = torch.tensor(cur_node_vals, device=DEVICE)
+        ref_logits = (a @ b).float()
+        _, _, ref_cl = vtnk_pytorch(ref_logits, cur_node, self.csr_small, step)
+        ref_topk_vals, ref_topk_idxs_raw = torch.topk(ref_cl, k, dim=-1)
+        ref_topk_idxs = torch.where(
+            ref_topk_vals > float("-inf"),
+            ref_topk_idxs_raw,
+            torch.full_like(ref_topk_idxs_raw, -1),
+        )
+        constraint_state = ConstraintState(
+            step=step, trie=self.csr_small, cur_node=cur_node
+        )
+        ker_nn, ker_vi, ker_topk_l, ker_topk_i = (
+            fused_linear_constrained_node_transition_topk_cute(
+                a, b, constraint_state, k
+            )
+        )
+        assert torch.allclose(
+            ker_topk_l.sort(dim=-1).values,
+            ref_topk_vals.sort(dim=-1).values,
+            atol=1e-2,
+            equal_nan=True,
+        ), f"topk logits mismatch\nkernel: {ker_topk_l}\nref:    {ref_topk_vals}"
+        assert torch.equal(
+            ker_topk_i.sort(dim=-1).values,
+            ref_topk_idxs.sort(dim=-1).values,
+        ), f"topk idxs mismatch\nkernel: {ker_topk_i}\nref:    {ref_topk_idxs}"
+
+    def test_fused_topk_cute_k1_b1_step0(self) -> None:
+        self._assert_fused_topk_cute(1, 16, 0, [0], k=1)
+
+    def test_fused_topk_cute_k1_b2_step1(self) -> None:
+        self._assert_fused_topk_cute(2, 16, 1, [1, 2], k=1)
+
+    def test_fused_topk_cute_k2_b1_step0(self) -> None:
+        self._assert_fused_topk_cute(1, 16, 0, [0], k=2)
+
+    def test_fused_topk_cute_k2_b2_step1(self) -> None:
+        self._assert_fused_topk_cute(2, 16, 1, [1, 2], k=2)
+
+    def test_fused_topk_cute_k1_b3_step2(self) -> None:
+        self._assert_fused_topk_cute(3, 16, 2, [3, 4, 3], k=1)
+
+    def test_fused_topk_cute_k2_b3_step2(self) -> None:
+        self._assert_fused_topk_cute(3, 16, 2, [3, 4, 3], k=2)
+
+    def test_fused_topk_cute_k3_b8_large_k(self) -> None:
+        self._assert_fused_topk_cute(8, 128, 0, [0] * 8, k=2)

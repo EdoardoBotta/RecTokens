@@ -8,6 +8,15 @@ from rectokens.kernels.constrained_node_transition import (
 )
 from rectokens.schemas.state import ConstraintState
 
+try:
+    from rectokens.kernels.constrained_node_transition_cute import (
+        _cute_fused_linear_constrained_node_transition_topk_op,
+    )
+
+    CUTE_DSL_AVAILABLE = True
+except ImportError:
+    CUTE_DSL_AVAILABLE = False
+
 
 def fused_linear_constrained_node_transition(
     a: torch.Tensor,
@@ -100,6 +109,43 @@ def fused_linear_constrained_node_transition_topk(
     step = constraint_state.step
     max_branches = constraint_state.trie.layer_max_branches[step]
     return _fused_linear_constrained_node_transition_topk_op(
+        a,
+        b,
+        bias_val,
+        constraint_state.cur_node,
+        constraint_state.trie.row_ptrs,
+        constraint_state.trie.stacked_cols_vals,
+        max_branches,
+        bias is not None,
+        k,
+    )
+
+
+def fused_linear_constrained_node_transition_topk_cute(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    constraint_state: ConstraintState,
+    k: int,
+    bias: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    CuTe DSL variant of ``fused_linear_constrained_node_transition_topk``.
+
+    Identical interface and semantics; uses an NVIDIA CuTe DSL kernel instead
+    of Triton.  Falls back to the Triton version when the ``cutlass`` package
+    is not installed.
+
+    Returns (next_node, valid_idxs, topk_logits, topk_idxs).
+    """
+    if not CUTE_DSL_AVAILABLE:
+        return fused_linear_constrained_node_transition_topk(
+            a, b, constraint_state, k, bias
+        )
+
+    bias_val = bias if bias is not None else a.new_empty(0)
+    step = constraint_state.step
+    max_branches = constraint_state.trie.layer_max_branches[step]
+    return _cute_fused_linear_constrained_node_transition_topk_op(
         a,
         b,
         bias_val,

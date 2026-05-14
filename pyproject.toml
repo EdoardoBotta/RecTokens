@@ -30,6 +30,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cutedsl = ["nvidia-cutlass>=4.0"]
 faiss = ["faiss-cpu>=1.7"]
 hf = ["transformers>=4.30"]
 dev = [
