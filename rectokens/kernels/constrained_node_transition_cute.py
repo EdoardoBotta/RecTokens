@@ -11,9 +11,22 @@ The kernel fuses:
 
 Parallelism strategy
 --------------------
-Block layout: ``(WARP_SIZE=32, BLOCK_B=4, 1)`` — 128 threads total.
-Each y-stripe is one CUDA warp; all 32 lanes share the same ``batch_idx`` so
-the three guarding conditions are warp-uniform (no divergence).
+Block layout: ``(WARP_SIZE=16, BLOCK_B=16, 1)`` — 256 threads total.
+``threadIdx.x`` (lane 0–15) is the reduction dimension; ``threadIdx.y``
+(local_b 0–15) selects the batch item within the block.
+
+Because ``WARP_SIZE=16``, two consecutive batch items (local_b 2i and 2i+1)
+share one physical CUDA warp (32 threads).  The warp-shuffle reduction therefore
+uses offsets ``[8, 4, 2, 1]`` — communicating only within one half-warp — to
+avoid mixing accumulators across batch items.
+
+Register staging of ``a``
+-------------------------
+Each thread pre-loads its slice ``a[batch_idx, lane :: WARP_SIZE]`` into a
+small register array before the branch loop, then reuses those registers
+across all ``BRANCHES_PER_BLOCK`` dot products.  There is no cross-thread
+sharing on ``a`` (lane ``L`` only ever reads positions ``L, L+16, L+32, …``),
+so shared memory is unnecessary.
 
 Eliminating per-call MLIR re-generation
 ----------------------------------------
@@ -23,15 +36,14 @@ completely dominating the ~1.5 ms GPU kernel.
 
 Fix: ``_FusedTopKKernel.launch()`` calls ``_launch(..., compile_only=True)``
 on the first invocation to obtain the compiled ``JitExecutor`` and caches it.
-Subsequent calls invoke the executor directly (``generate_execution_args`` +
-``run_compiled_program``) — no MLIR IR is regenerated (~1.5 ms total).
+Subsequent calls invoke the executor directly — no MLIR IR is regenerated.
 
 Avoiding JIT recompilation
 --------------------------
 ``@cute.jit`` bakes Python-int arguments into the MLIR module; a different
-value forces a full recompile (~75 ms extra).  ``max_branches`` has been
-removed from ``_launch``'s parameter list entirely.  ``grid_y`` now comes from
-``self._max_branches``, a stable instance attribute set at construction.
+value forces a full recompile (~75 ms extra).  ``max_branches`` and
+``BRANCHES_PER_BLOCK`` influence ``grid_y`` via ``self._max_branches``, a
+stable instance attribute.
 
 ``_get_kernel`` rounds ``max_branches`` up to the next power of two (bucket)
 so one compiled kernel covers all trie steps within that bound.
@@ -39,7 +51,7 @@ so one compiled kernel covers all trie steps within that bound.
 Residual compile-time dependencies
 ------------------------------------
 ``B_val`` and ``K_val`` are extracted from tensor shapes inside ``@cute.jit``
-and baked per (has_bias, bucket, B, K) combination.  Each unique combination
+and baked per ``(has_bias, bucket, B, K)`` combination.  Each unique combination
 compiles once and hits the executor cache on every subsequent step.
 """
 
@@ -87,18 +99,22 @@ def _ceil_power_of_2(n: int) -> int:
 
 
 class _FusedTopKKernel:
-    """CuTe DSL kernel, one instance per (has_bias, max_branches_bucket) pair.
+    """CuTe DSL kernel, one instance per (has_bias, max_branches_bucket, B, K) tuple.
 
     After the first ``launch()`` call the compiled ``JitExecutor`` is cached;
     all subsequent calls bypass MLIR re-generation entirely.
     """
 
-    BLOCK_B   = 4    # warps (= batch items) per thread-block
-    WARP_SIZE = 32   # threads per dot product; must divide K evenly
+    BLOCK_B           = 16   # batch items per thread-block (= half-warps)
+    WARP_SIZE         = 16   # threads per dot-product reduction (half-warp)
+    BRANCHES_PER_BLOCK = 16   # branches handled per block; a[batch,:] is read once
+                              # from gmem and reused across all BRANCHES_PER_BLOCK dot products
 
-    def __init__(self, has_bias: bool, max_branches: int) -> None:
+    def __init__(self, has_bias: bool, max_branches: int, B: int, K: int) -> None:
         self._has_bias     = has_bias
         self._max_branches = max_branches  # stable bucket; never changes per instance
+        self._B            = B             # baked into compiled kernel as Python int
+        self._K            = K             # baked into compiled kernel as Python int
         self._jit_executor = None          # populated on first launch(), None until then
 
     # -- host-side launcher (JIT-compiled) ----------------------------------
@@ -117,18 +133,16 @@ class _FusedTopKKernel:
         valid_idxs_out: cute.Tensor,
         branch_logits_out: cute.Tensor,
     ):
-        B_val  = a.shape[0]
-        K_val  = a.shape[1]
-        grid_x = (B_val + self.BLOCK_B - 1) // self.BLOCK_B
-        # grid_y from instance attribute (not a JIT arg) so the compiled module
-        # hash is stable for the lifetime of this kernel instance.
-        grid_y = self._max_branches
+        # B and K come from instance attributes (Python ints) — keeps alloc_smem
+        # and shape arithmetic compile-time constant. The kernel cache is already
+        # keyed on (has_bias, bucket, B, K), so each instance has fixed B/K.
+        grid_x = (self._B + self.BLOCK_B - 1) // self.BLOCK_B
+        grid_y = (self._max_branches + self.BRANCHES_PER_BLOCK - 1) // self.BRANCHES_PER_BLOCK
 
         self._kernel(
             a, b, bias,
             cur_node, row_ptrs, cols, vals,
             next_node_out, valid_idxs_out, branch_logits_out,
-            B_val, K_val,
         ).launch(
             grid=(grid_x, grid_y, 1),
             block=(self.WARP_SIZE, self.BLOCK_B, 1),
@@ -149,16 +163,26 @@ class _FusedTopKKernel:
         next_node_out: cute.Tensor,
         valid_idxs_out: cute.Tensor,
         branch_logits_out: cute.Tensor,
-        B_val,
-        K_val,
     ):
         lane, local_b, _ = cute.arch.thread_idx()
         bidx_x, bidx_y, _ = cute.arch.block_idx()
 
-        batch_idx  = bidx_x * self.BLOCK_B + local_b
-        branch_idx = bidx_y
+        batch_idx   = bidx_x * self.BLOCK_B + local_b
+        branch_base = bidx_y * self.BRANCHES_PER_BLOCK
 
-        if batch_idx < B_val:
+        K_PER_LANE = self._K // self.WARP_SIZE
+
+        if batch_idx < self._B:
+            # Pre-load a[batch_idx, lane :: WARP_SIZE] into registers.
+            # range_constexpr forces a Python-time loop (preprocessor rewrites
+            # it to a plain Python range), so a_cache stays a list of
+            # K_PER_LANE distinct SSA values (register-allocated).
+            # NB: must be a real `for` statement — the preprocessor doesn't
+            # rewrite list-comprehensions.
+            a_cache = []
+            for i in cutlass.range_constexpr(K_PER_LANE):
+                a_cache.append(a[batch_idx, lane + i * self.WARP_SIZE])
+
             node    = cur_node[batch_idx]
             node_32 = node.to(cutlass.Int32)
             if node_32 >= 0:
@@ -166,28 +190,34 @@ class _FusedTopKKernel:
                 row_end    = row_ptrs[node_32 + 1]
                 n_children = row_end - row_start
 
-                # Warp-uniform guard: excess grid-y blocks (branch_idx >= n_children)
-                # exit here and never write to output buffers.
-                if branch_idx < n_children.to(cutlass.Int32):
-                    offset = row_start.to(cutlass.Int32) + branch_idx
-                    col    = cols[offset]
-                    val    = vals[offset]
-                    col_32 = col.to(cutlass.Int32)
+                for j in cutlass.range_constexpr(self.BRANCHES_PER_BLOCK):
+                    branch_idx = branch_base + j
+                    if branch_idx < n_children.to(cutlass.Int32):
+                        offset = row_start.to(cutlass.Int32) + branch_idx
+                        col    = cols[offset]
+                        val    = vals[offset]
+                        col_32 = col.to(cutlass.Int32)
 
-                    logit = a[batch_idx, lane] * b[col_32, lane]
-                    for i in range(1, K_val // self.WARP_SIZE):
-                        k = lane + i * self.WARP_SIZE
-                        logit = logit + a[batch_idx, k] * b[col_32, k]
+                        # Dot product using cached register values — a is read
+                        # from gmem exactly once per (batch, thread).
+                        logit = a_cache[0] * b[col_32, lane]
+                        for i in cutlass.range_constexpr(1, K_PER_LANE):
+                            k = lane + i * self.WARP_SIZE
+                            logit = logit + a_cache[i] * b[col_32, k]
 
-                    for shfl_offset in [16, 8, 4, 2, 1]:
-                        logit = logit + cute.arch.shuffle_sync_down(logit, shfl_offset)
+                        # Half-warp reduction: WARP_SIZE=16, so two batch items share
+                        # one 32-thread physical warp (lanes 0–15 = local_b N,
+                        # lanes 16–31 = local_b N+1).  Offset 16 would cross batch
+                        # boundaries; use [8, 4, 2, 1] to stay within one half-warp.
+                        for shfl_offset in [8, 4, 2, 1]:
+                            logit = logit + cute.arch.shuffle_sync_down(logit, shfl_offset)
 
-                    if lane == 0:
-                        if self._has_bias:
-                            logit = logit + bias[col_32]
-                        next_node_out[batch_idx, branch_idx]     = val
-                        valid_idxs_out[batch_idx, branch_idx]    = col
-                        branch_logits_out[batch_idx, branch_idx] = logit
+                        if lane == 0:
+                            if self._has_bias:
+                                logit = logit + bias[col_32]
+                            next_node_out[batch_idx, branch_idx]     = val
+                            valid_idxs_out[batch_idx, branch_idx]    = col
+                            branch_logits_out[batch_idx, branch_idx] = logit
 
     # -- fast launcher: bypasses MLIR re-generation after first call --------
 
@@ -221,8 +251,9 @@ class _FusedTopKKernel:
 # Kernel instance cache
 # ---------------------------------------------------------------------------
 
-# Keyed on (has_bias, bucket) where bucket = next power-of-2 >= max_branches.
-_kernel_cache: dict[tuple[bool, int], _FusedTopKKernel] = {}
+# Keyed on (has_bias, bucket, B, K) — @cute.jit bakes B and K into the MLIR module,
+# so each unique (B, K) combination needs its own compiled JitExecutor.
+_kernel_cache: dict[tuple, _FusedTopKKernel] = {}
 
 
 def _clear_kernel_cache() -> None:
@@ -241,11 +272,11 @@ def _clear_kernel_cache() -> None:
 atexit.register(_clear_kernel_cache)
 
 
-def _get_kernel(has_bias: bool, max_branches: int) -> _FusedTopKKernel:
+def _get_kernel(has_bias: bool, max_branches: int, B: int, K: int) -> _FusedTopKKernel:
     bucket = max(_ceil_power_of_2(max_branches), _FusedTopKKernel.BLOCK_B)
-    key = (has_bias, bucket)
+    key = (has_bias, bucket, B, K)
     if key not in _kernel_cache:
-        _kernel_cache[key] = _FusedTopKKernel(has_bias, bucket)
+        _kernel_cache[key] = _FusedTopKKernel(has_bias, bucket, B, K)
     return _kernel_cache[key]
 
 
@@ -296,7 +327,7 @@ def _cute_fused_linear_constrained_node_transition_topk_op(
     cols = csr_cols_vals[0]
     vals = csr_cols_vals[1]
 
-    _get_kernel(has_bias, max_branches).launch(
+    _get_kernel(has_bias, max_branches, B, K).launch(
         from_dlpack(a),
         from_dlpack(b_nk),
         from_dlpack(bias_val),
