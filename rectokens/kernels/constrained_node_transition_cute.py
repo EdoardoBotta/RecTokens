@@ -119,7 +119,7 @@ class _FusedTopKKernel:
         self._K                = K             # baked into compiled kernel as Python int
         # 64 branch iterations × K_PER_LANE=44 = 2,816 unrolled ops — compiles quickly.
         # Reduces grid_y from 32 to 8 (4× less A reloading vs BRANCHES_PER_BLOCK=16).
-        self.BRANCHES_PER_BLOCK = 64
+        self.BRANCHES_PER_BLOCK = min(64, max_branches) if B > 1024 else min(16, max_branches)
         self._jit_executor     = None          # populated on first launch(), None until then
 
     # -- host-side launcher (JIT-compiled) ----------------------------------
