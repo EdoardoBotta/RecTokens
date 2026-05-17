@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import math
 import warnings
 
 import cutlass
@@ -105,17 +106,21 @@ class _FusedTopKKernel:
     all subsequent calls bypass MLIR re-generation entirely.
     """
 
-    BLOCK_B           = 16   # batch items per thread-block (= half-warps)
-    WARP_SIZE         = 16   # threads per dot-product reduction (half-warp)
-    BRANCHES_PER_BLOCK = 16   # branches handled per block; a[batch,:] is read once
-                              # from gmem and reused across all BRANCHES_PER_BLOCK dot products
+    BLOCK_B   = 16   # batch items per thread-block (= half-warps)
+    WARP_SIZE = 16   # threads per dot-product reduction (half-warp)
+    # BRANCHES_PER_BLOCK is set to max_branches (the bucket) in __init__ so that
+    # all branches are handled in a single block, eliminating the 32× A-redundancy
+    # that arose when the branch dimension was tiled across grid_y blocks.
 
     def __init__(self, has_bias: bool, max_branches: int, B: int, K: int) -> None:
-        self._has_bias     = has_bias
-        self._max_branches = max_branches  # stable bucket; never changes per instance
-        self._B            = B             # baked into compiled kernel as Python int
-        self._K            = K             # baked into compiled kernel as Python int
-        self._jit_executor = None          # populated on first launch(), None until then
+        self._has_bias         = has_bias
+        self._max_branches     = max_branches  # stable bucket; never changes per instance
+        self._B                = B             # baked into compiled kernel as Python int
+        self._K                = K             # baked into compiled kernel as Python int
+        # 64 branch iterations × K_PER_LANE=44 = 2,816 unrolled ops — compiles quickly.
+        # Reduces grid_y from 32 to 8 (4× less A reloading vs BRANCHES_PER_BLOCK=16).
+        self.BRANCHES_PER_BLOCK = 64
+        self._jit_executor     = None          # populated on first launch(), None until then
 
     # -- host-side launcher (JIT-compiled) ----------------------------------
 
@@ -205,11 +210,10 @@ class _FusedTopKKernel:
                             k = lane + i * self.WARP_SIZE
                             logit = logit + a_cache[i] * b[col_32, k]
 
-                        # Half-warp reduction: WARP_SIZE=16, so two batch items share
-                        # one 32-thread physical warp (lanes 0–15 = local_b N,
-                        # lanes 16–31 = local_b N+1).  Offset 16 would cross batch
-                        # boundaries; use [8, 4, 2, 1] to stay within one half-warp.
-                        for shfl_offset in [8, 4, 2, 1]:
+                        # Reduce within the WARP_SIZE-wide logical lane group.
+                        # Offsets are powers of two from WARP_SIZE/2 down to 1,
+                        # keeping communication within the batch item's lane group.
+                        for shfl_offset in [self.WARP_SIZE >> s for s in range(1, int(math.log2(self.WARP_SIZE)) + 1)]:
                             logit = logit + cute.arch.shuffle_sync_down(logit, shfl_offset)
 
                         if lane == 0:

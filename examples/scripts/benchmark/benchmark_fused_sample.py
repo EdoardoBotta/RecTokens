@@ -10,6 +10,9 @@ Grid: B (batch size) × N (vocab / logits size). K (hidden dim) fixed.
 
 import argparse
 import os
+
+os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
+
 import torch
 import torch.nn.functional as F
 import triton.testing as testing
@@ -220,7 +223,7 @@ if __name__ == "__main__":
     os.makedirs("out", exist_ok=True)
 
     B_vals = [256, 1024, 4096]
-    N_vals = [512, 1024, 8192, 150000]
+    N_vals = [150000]
 
     print(f"Benchmarking K={K}, sparsity={args.sparsity}, topk={args.topk}")
     print(f"Algorithms: {args.algorithms}")

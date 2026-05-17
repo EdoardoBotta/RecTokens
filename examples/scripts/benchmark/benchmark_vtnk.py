@@ -241,7 +241,7 @@ if __name__ == "__main__":
     os.makedirs("out", exist_ok=True)
 
     B_vals = [256, 1024, 4096]
-    N_vals = [512, 1024, 8192, 150000]
+    N_vals = [150000]
 
     print(f"Benchmarking K={K}, sparsity={args.sparsity}")
     print(f"Algorithms: {args.algorithms}")
