@@ -10,6 +10,9 @@ Grid: B (batch size) × N (vocab / logits size). K (hidden dim) fixed.
 
 import argparse
 import os
+
+os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
+
 import torch
 import torch.nn.functional as F
 import triton.testing as testing
@@ -21,8 +24,10 @@ from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 from rectokens.schemas.state import ConstraintState
 from rectokens.decoding.vntk import sparse_linear_pytorch
 from rectokens.ops.constrained_node_transition import (
+    CUTE_DSL_AVAILABLE,
     fused_linear_constrained_node_transition_sampling,
     fused_linear_constrained_node_transition_topk,
+    fused_linear_constrained_node_transition_topk_cute,
 )
 
 DEVICE = torch.device("cuda")
@@ -36,12 +41,11 @@ ALL_ALGORITHMS = [
     "sparse_pytorch_sample",
     "fused_topk",
     "sparse_pytorch_topk",
+    "cute_topk",
 ]
 DEFAULT_ALGORITHMS = [
-    "fused_sample",
-    "sparse_pytorch_sample",
     "fused_topk",
-    "sparse_pytorch_topk",
+    "cute_topk",
 ]
 DEFAULT_SPARSITY = 0.01
 
@@ -83,6 +87,10 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top):
 
             cs = ConstraintState(step=0, trie=csr, cur_node=cur_node)
 
+            if "cute_topk" in alg_set and not CUTE_DSL_AVAILABLE:
+                print("  [WARNING] cute_topk requested but nvidia-cutlass-dsl not installed — skipping")
+                alg_set = alg_set - {"cute_topk"}
+
             needs_sparse = alg_set & {"sparse_pytorch_sample", "sparse_pytorch_topk"}
             if needs_sparse:
                 sparse_linear_pytorch_compiled = torch.compile(sparse_linear_pytorch)
@@ -114,6 +122,8 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top):
                     fused_linear_constrained_node_transition_topk(a, weight.T, cs, k=k)
                 if "sparse_pytorch_topk" in alg_set:
                     sparse_pytorch_with_topk()
+                if "cute_topk" in alg_set:
+                    fused_linear_constrained_node_transition_topk_cute(a, weight.T, cs, k=k)
 
             record = {"B": B, "N": N}
 
@@ -139,6 +149,12 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top):
                     record["ms_sparse_pytorch_topk"] = run_bench(
                         sparse_pytorch_with_topk
                     )
+                if "cute_topk" in alg_set:
+                    record["ms_cute_topk"] = run_bench(
+                        lambda: fused_linear_constrained_node_transition_topk_cute(
+                            a, weight.T, cs, k=k
+                        )
+                    )
 
             if "fused_sample" in alg_set and "sparse_pytorch_sample" in alg_set:
                 record["speedup_fused_vs_sparse_pytorch_sample"] = (
@@ -147,6 +163,10 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top):
             if "fused_topk" in alg_set and "sparse_pytorch_topk" in alg_set:
                 record["speedup_fused_topk_vs_sparse_pytorch_topk"] = (
                     record["ms_sparse_pytorch_topk"] / record["ms_fused_topk"]
+                )
+            if "cute_topk" in alg_set and "fused_topk" in alg_set:
+                record["speedup_cute_topk_vs_triton_topk"] = (
+                    record["ms_fused_topk"] / record["ms_cute_topk"]
                 )
 
             records.append(record)
@@ -203,7 +223,7 @@ if __name__ == "__main__":
     os.makedirs("out", exist_ok=True)
 
     B_vals = [256, 1024, 4096]
-    N_vals = [512, 1024, 8192, 150000]
+    N_vals = [150000]
 
     print(f"Benchmarking K={K}, sparsity={args.sparsity}, topk={args.topk}")
     print(f"Algorithms: {args.algorithms}")
@@ -238,4 +258,12 @@ if __name__ == "__main__":
             title=f"Fused top-k speedup vs compile(sparse_linear_pytorch)+topk  (K={K}, k={args.topk})",
             filename="out/heatmap_fused_topk_vs_sparse_pytorch_topk.jpg",
             cbar_label="Speedup (>1 = fused faster)",
+        )
+    if "speedup_cute_topk_vs_triton_topk" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_cute_topk_vs_triton_topk",
+            title=f"CuTe top-k speedup vs Triton top-k  (K={K}, k={args.topk})",
+            filename="out/heatmap_cute_vs_triton_cst_topk.jpg",
+            cbar_label="Speedup (>1 = CuTe faster)",
         )

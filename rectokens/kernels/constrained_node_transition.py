@@ -69,7 +69,7 @@ def _constrained_node_transition_op(
         triton.Config({"BLOCK_B": 128, "BLOCK_N": 64, "GROUP_SIZE_M": 4}),
         triton.Config({"BLOCK_B": 128, "BLOCK_N": 128, "GROUP_SIZE_M": 8}),
     ],
-    key=["B", "N"],
+    key=["B", "N", "max_branches"],
     restore_value=["corrected_logits_ptr", "next_node_ptr", "valid_idxs_ptr"],
 )
 @triton.jit
@@ -98,7 +98,7 @@ def _constrained_node_transition_kernel(
     BLOCK_B: tl.constexpr,
     BLOCK_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
-    max_branches,
+    max_branches: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(B, BLOCK_B)
@@ -184,6 +184,8 @@ _FUSED_AUTOTUNE_CONFIGS = [
     triton.Config({"BLOCK_B": 128, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}),
     triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
     triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
+    #triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 64}),
+    #triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 64}),
 ]
 
 
@@ -637,7 +639,7 @@ def _fused_linear_constrained_node_transition_sampling_op(
 
 @triton.autotune(
     configs=_FUSED_AUTOTUNE_CONFIGS,
-    key=["B", "K"],
+    key=["B", "K", "max_branches"],
     restore_value=[
         "next_node_ptr",
         "valid_idxs_ptr",
@@ -855,7 +857,7 @@ def _fused_linear_constrained_node_transition_topk_op(
 
 @triton.autotune(
     configs=_FUSED_AUTOTUNE_CONFIGS,
-    key=["B", "K"],
+    key=["B", "K", "max_branches"],
     restore_value=["next_node_ptr", "valid_idxs_ptr", "branch_logits_ptr"],
 )
 @triton.jit
