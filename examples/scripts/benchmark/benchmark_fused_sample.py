@@ -31,7 +31,7 @@ from rectokens.ops.constrained_node_transition import (
 )
 
 DEVICE = torch.device("cuda")
-K = 512
+K = 1024
 K_TOP = 50
 WARMUP = 25
 REP = 100
@@ -56,7 +56,7 @@ def lex_sort(rows: list[list[int]]) -> torch.Tensor:
 
 def make_csr(vocab_size: int, max_branches: int) -> CompactCSRTrie:
     seqs = [[i] for i in range(max_branches)]
-    csr = CompactCSRTrie.from_sorted_batch(lex_sort(seqs), vocab_size=vocab_size)
+    csr = CompactCSRTrie.from_sorted_batch(lex_sort(seqs), vocab_size=vocab_size, dense_lookup_layers=0)
     return csr._replace(
         row_ptrs=csr.row_ptrs.to(DEVICE),
         stacked_cols_vals=csr.stacked_cols_vals.to(DEVICE),
@@ -65,11 +65,34 @@ def make_csr(vocab_size: int, max_branches: int) -> CompactCSRTrie:
     )
 
 
+def make_csr_diverse(
+    vocab_size: int, max_branches: int, B: int
+) -> tuple[CompactCSRTrie, torch.Tensor]:
+    """2-level trie: root → num_nodes children, each → max_branches children.
+
+    Returns (csr, cur_node) where cur_node spreads batch items across level-1 nodes
+    so different batch elements traverse different parts of the trie.
+    Use with step=1 in ConstraintState so layer_max_branches[1] == max_branches.
+    """
+    num_nodes = min(B, 512)
+    seqs = lex_sort([[i, j] for i in range(num_nodes) for j in range(max_branches)])
+    csr = CompactCSRTrie.from_sorted_batch(seqs, vocab_size=vocab_size, dense_lookup_layers=0)
+    csr = csr._replace(
+        row_ptrs=csr.row_ptrs.to(DEVICE),
+        stacked_cols_vals=csr.stacked_cols_vals.to(DEVICE),
+        dense_mask_by_layer=[v.to(DEVICE) for v in csr.dense_mask_by_layer],
+        dense_states=csr.dense_states.to(DEVICE),
+    )
+    # Level-1 BFS node IDs are 1..num_nodes (root is 0, its children follow in BFS order)
+    cur_node = (torch.arange(B, dtype=torch.long) % num_nodes + 1).to(DEVICE)
+    return csr, cur_node
+
+
 def run_bench(fn):
     return testing.do_bench(fn, warmup=WARMUP, rep=REP)
 
 
-def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top):
+def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=False):
     alg_set = set(algorithms)
     records = []
 
@@ -79,13 +102,18 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top):
             k = min(k_top, max_branches)
             print(f"  B={B:6d}  N={N:6d}  max_branches={max_branches}  k={k}")
 
-            csr = make_csr(vocab_size=N, max_branches=max_branches)
+            if diverse_nodes:
+                csr, cur_node = make_csr_diverse(vocab_size=N, max_branches=max_branches, B=B)
+                step = 1
+            else:
+                csr = make_csr(vocab_size=N, max_branches=max_branches)
+                cur_node = torch.zeros(B, dtype=torch.long, device=DEVICE)
+                step = 0
 
             a = torch.randn(B, K, device=DEVICE)
             weight = torch.randn(N, K, device=DEVICE)
-            cur_node = torch.zeros(B, dtype=torch.long, device=DEVICE)
 
-            cs = ConstraintState(step=0, trie=csr, cur_node=cur_node)
+            cs = ConstraintState(step=step, trie=csr, cur_node=cur_node)
 
             if "cute_topk" in alg_set and not CUTE_DSL_AVAILABLE:
                 print("  [WARNING] cute_topk requested but nvidia-cutlass-dsl not installed — skipping")
@@ -99,7 +127,7 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top):
 
                 def sparse_pytorch_with_sample():
                     _, _, corrected_logits = sparse_linear_pytorch_compiled(
-                        a, weight, cur_node, csr, step=0
+                        a, weight, cur_node, csr, step=step
                     )
                     probs = F.softmax(corrected_logits, dim=-1)
                     return torch.multinomial(probs, num_samples=1).squeeze(-1)
@@ -108,7 +136,7 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top):
 
                 def sparse_pytorch_with_topk():
                     _, _, corrected_logits = sparse_linear_pytorch_compiled(
-                        a, weight, cur_node, csr, step=0
+                        a, weight, cur_node, csr, step=step
                     )
                     return torch.topk(corrected_logits, k, dim=-1)
 
@@ -217,6 +245,15 @@ if __name__ == "__main__":
         default=K_TOP,
         help="k for top-k benchmarks (default: %(default)s)",
     )
+    parser.add_argument(
+        "--diverse-nodes",
+        action="store_true",
+        default=False,
+        help=(
+            "Place each batch element on a different trie node (2-level trie, step=1) "
+            "instead of all starting at the root. Tests realistic cache-miss pressure."
+        ),
+    )
     args = parser.parse_args()
 
     assert torch.cuda.is_available(), "CUDA required"
@@ -225,7 +262,7 @@ if __name__ == "__main__":
     B_vals = [256, 1024, 4096]
     N_vals = [150000]
 
-    print(f"Benchmarking K={K}, sparsity={args.sparsity}, topk={args.topk}")
+    print(f"Benchmarking K={K}, sparsity={args.sparsity}, topk={args.topk}, diverse_nodes={args.diverse_nodes}")
     print(f"Algorithms: {args.algorithms}")
     print(f"B_vals={B_vals}")
     print(f"N_vals={N_vals}\n")
@@ -236,6 +273,7 @@ if __name__ == "__main__":
         algorithms=args.algorithms,
         sparsity=args.sparsity,
         k_top=args.topk,
+        diverse_nodes=args.diverse_nodes,
     )
     csv_path = "out/bench_fused_sample.csv"
     df.to_csv(csv_path, index=False)

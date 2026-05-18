@@ -149,6 +149,18 @@ class CompactCSRTrie(NamedTuple):
         vals = torch.arange(1, len(cols) + 1, device=device)
         vals[-1] = -1
 
+        stacked = torch.stack([cols, vals])
+
+        if dense_lookup_layers == 0:
+            return cls(
+                row_ptrs=rows,
+                stacked_cols_vals=stacked,
+                layer_max_branches=layer_max_branches,
+                dense_mask_by_layer=[],
+                dense_states=torch.zeros(0, dtype=torch.long, device=device),
+                vocab_size=vocab_size,
+            )
+
         mask = torch.zeros(
             [vocab_size] * dense_lookup_layers, dtype=torch.bool, device=sem_ids.device
         )
@@ -169,7 +181,7 @@ class CompactCSRTrie(NamedTuple):
 
         return cls(
             row_ptrs=rows,
-            stacked_cols_vals=torch.stack([cols, vals]),
+            stacked_cols_vals=stacked,
             layer_max_branches=layer_max_branches,
             dense_mask_by_layer=dense_mask_by_layer,
             dense_states=dense_states,

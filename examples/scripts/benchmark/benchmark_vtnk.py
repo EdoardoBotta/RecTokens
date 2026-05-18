@@ -35,6 +35,8 @@ ALL_ALGORITHMS = ["fused", "kernel", "pytorch", "sparse_pytorch", "trie_cpu"]
 DEFAULT_ALGORITHMS = ["fused", "kernel", "pytorch", "sparse_pytorch"]
 DEFAULT_SPARSITY = 0.01
 
+torch.set_float32_matmul_precision("high")
+
 
 def lex_sort(rows: list[list[int]]) -> torch.Tensor:
     return torch.tensor(sorted(rows), dtype=torch.long)
@@ -49,6 +51,29 @@ def make_csr(vocab_size: int, max_branches: int) -> object:
         dense_mask_by_layer=[v.to(DEVICE) for v in csr.dense_mask_by_layer],
         dense_states=csr.dense_states.to(DEVICE),
     )
+
+
+def make_csr_diverse(
+    vocab_size: int, max_branches: int, B: int
+) -> tuple[object, torch.Tensor]:
+    """2-level trie: root → num_nodes children, each → max_branches children.
+
+    Returns (csr, cur_node) where cur_node spreads batch items across level-1 nodes
+    so different batch elements traverse different parts of the trie.
+    Use with step=1 in ConstraintState so layer_max_branches[1] == max_branches.
+    """
+    num_nodes = min(B, 512)
+    seqs = lex_sort([[i, j] for i in range(num_nodes) for j in range(max_branches)])
+    csr = CompactCSRTrie.from_sorted_batch(seqs, vocab_size=vocab_size)
+    csr = csr._replace(
+        row_ptrs=csr.row_ptrs.to(DEVICE),
+        stacked_cols_vals=csr.stacked_cols_vals.to(DEVICE),
+        dense_mask_by_layer=[v.to(DEVICE) for v in csr.dense_mask_by_layer],
+        dense_states=csr.dense_states.to(DEVICE),
+    )
+    # Level-1 BFS node IDs are 1..num_nodes (root is 0, its children follow in BFS order)
+    cur_node = (torch.arange(B, dtype=torch.long) % num_nodes + 1).to(DEVICE)
+    return csr, cur_node
 
 
 def make_trie(max_branches: int) -> tuple[Trie, list[TrieNode]]:
@@ -97,7 +122,7 @@ def run_bench_cpu(fn, warmup: int = WARMUP, rep: int = REP) -> float:
     return float(sum(times[: max(1, rep // 2)]) / max(1, rep // 2))
 
 
-def benchmark_grid(B_vals, N_vals, algorithms, sparsity):
+def benchmark_grid(B_vals, N_vals, algorithms, sparsity, diverse_nodes=False):
     alg_set = set(algorithms)
     gpu_algos = alg_set & {"fused", "kernel", "pytorch", "sparse_pytorch"}
     max_B, max_N = max(B_vals), max(N_vals)
@@ -108,18 +133,27 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity):
             max_branches = max(1, int(N * sparsity))
             print(f"  B={B:6d}  N={N:6d}  max_branches={max_branches}")
 
-            # CPU traversal is too slow to run at the highest N and B values
-            skip_cpu = B == max_B or N == max_N
+            # CPU traversal is too slow to run at the highest N and B values,
+            # and incompatible with diverse_nodes (requires a deeper Trie object).
+            skip_cpu = B == max_B or N == max_N or diverse_nodes
             active_alg_set = alg_set - ({"trie_cpu"} if skip_cpu else set())
 
             if gpu_algos:
-                csr = make_csr(vocab_size=N, max_branches=max_branches)
+                if diverse_nodes:
+                    csr, cur_node = make_csr_diverse(vocab_size=N, max_branches=max_branches, B=B)
+                    step = 1
+                else:
+                    csr = make_csr(vocab_size=N, max_branches=max_branches)
+                    cur_node = torch.zeros(B, dtype=torch.long, device=DEVICE)
+                    step = 0
             if "trie_cpu" in active_alg_set:
                 _, trie_nodes = make_trie(max_branches=max_branches)
 
             a = torch.randn(B, K, device=DEVICE)
             weight = torch.randn(N, K, device=DEVICE)
-            cur_node = torch.zeros(B, dtype=torch.long, device=DEVICE)
+            if not gpu_algos:
+                cur_node = torch.zeros(B, dtype=torch.long, device=DEVICE)
+                step = 0
             if "trie_cpu" in active_alg_set:
                 cur_node_cpu = cur_node.cpu()
 
@@ -132,7 +166,7 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity):
                 sparse_linear_pytorch_compiled = torch.compile(sparse_linear_pytorch)
 
             if gpu_algos:
-                cs = ConstraintState(step=0, trie=csr, cur_node=cur_node)
+                cs = ConstraintState(step=step, trie=csr, cur_node=cur_node)
 
             # --- warmup / force compilation ---
             with torch.no_grad():
@@ -141,9 +175,9 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity):
                 if "kernel" in active_alg_set:
                     constrained_node_transition(a @ weight.T, cs)
                 if "pytorch" in active_alg_set:
-                    vtnk_pytorch(linear(a), cur_node, csr, step=0)
+                    vtnk_pytorch(linear(a), cur_node, csr, step=step)
                 if "sparse_pytorch" in active_alg_set:
-                    sparse_linear_pytorch_compiled(a, weight, cur_node, csr, step=0)
+                    sparse_linear_pytorch_compiled(a, weight, cur_node, csr, step=step)
 
             record = {"B": B, "N": N}
 
@@ -161,12 +195,12 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity):
                     )
                 if "pytorch" in active_alg_set:
                     record["ms_pytorch"] = run_bench(
-                        lambda: vtnk_pytorch(linear(a), cur_node, csr, step=0)
+                        lambda: vtnk_pytorch(linear(a), cur_node, csr, step=step)
                     )
                 if "sparse_pytorch" in active_alg_set:
                     record["ms_sparse_pytorch"] = run_bench(
                         lambda: sparse_linear_pytorch_compiled(
-                            a, weight, cur_node, csr, step=0
+                            a, weight, cur_node, csr, step=step
                         )
                     )
             if "trie_cpu" in active_alg_set:
@@ -235,6 +269,16 @@ if __name__ == "__main__":
         default=DEFAULT_SPARSITY,
         help="Fraction of vocab used as max branches (default: %(default)s)",
     )
+    parser.add_argument(
+        "--diverse-nodes",
+        action="store_true",
+        default=False,
+        help=(
+            "Place each batch element on a different trie node (2-level trie, step=1) "
+            "instead of all starting at the root. Tests realistic cache-miss pressure. "
+            "Incompatible with trie_cpu (automatically skipped)."
+        ),
+    )
     args = parser.parse_args()
 
     assert torch.cuda.is_available(), "CUDA required"
@@ -243,13 +287,14 @@ if __name__ == "__main__":
     B_vals = [256, 1024, 4096]
     N_vals = [150000]
 
-    print(f"Benchmarking K={K}, sparsity={args.sparsity}")
+    print(f"Benchmarking K={K}, sparsity={args.sparsity}, diverse_nodes={args.diverse_nodes}")
     print(f"Algorithms: {args.algorithms}")
     print(f"B_vals={B_vals}")
     print(f"N_vals={N_vals}\n")
 
     df = benchmark_grid(
-        B_vals, N_vals, algorithms=args.algorithms, sparsity=args.sparsity
+        B_vals, N_vals, algorithms=args.algorithms, sparsity=args.sparsity,
+        diverse_nodes=args.diverse_nodes,
     )
     csv_path = "out/bench_vtnk.csv"
     df.to_csv(csv_path, index=False)

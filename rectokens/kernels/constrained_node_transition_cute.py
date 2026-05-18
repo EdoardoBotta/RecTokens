@@ -344,6 +344,8 @@ def _cute_fused_linear_constrained_node_transition_topk_op(
         from_dlpack(branch_logits),
     )
 
+    if k >= max_branches:
+        return next_node, valid_idxs, branch_logits, valid_idxs.clone()
     topk_logits, topk_branch_idxs = torch.topk(branch_logits, k, dim=-1)
     topk_idxs = valid_idxs.gather(1, topk_branch_idxs)
 
