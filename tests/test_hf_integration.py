@@ -681,7 +681,9 @@ class _MockHFModelWithForward(nn.Module):
     def set_output_embeddings(self, new_embeddings: nn.Module) -> None:
         self._lm_head = new_embeddings
 
-    def forward(self, input_ids, past_key_values=None, use_cache=False, attention_mask=None):
+    def forward(
+        self, input_ids, past_key_values=None, use_cache=False, attention_mask=None
+    ):
         from transformers.modeling_outputs import CausalLMOutputWithPast
 
         x = self._emb(input_ids)[:, -1, :]  # (B, hidden) — last token only, 2-D
@@ -782,7 +784,9 @@ class TestAutoregressiveGenerate(unittest.TestCase):
 
         # Warm up Triton kernels to avoid async JIT-compilation errors in the
         # first test method (CUDA error from compilation bleeds into the next call).
-        _warmup = _MockHFModelWithForward(cls._vocab_size, cls._hidden_size).to(cls._device)
+        _warmup = _MockHFModelWithForward(cls._vocab_size, cls._hidden_size).to(
+            cls._device
+        )
         autoregressive_generate(
             _warmup,
             cls._trie,

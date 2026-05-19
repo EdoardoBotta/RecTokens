@@ -184,8 +184,8 @@ _FUSED_AUTOTUNE_CONFIGS = [
     triton.Config({"BLOCK_B": 128, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}),
     triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
     triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
-    #triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 64}),
-    #triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 64}),
+    # triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 64}),
+    # triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 64}),
 ]
 
 
@@ -931,12 +931,16 @@ def _fused_sparse_linear_constrained_node_transition_topk_kernel(
     # All three outputs are indexed by branch_idx (contiguous), so store as 2D blocks.
     store_mask = b_mask[:, None] & (offs_BR[None, :] < max_branches)
     tl.store(
-        next_node_ptr + offs_B[:, None] * next_node_stride_B + offs_BR[None, :] * next_node_stride_N,
+        next_node_ptr
+        + offs_B[:, None] * next_node_stride_B
+        + offs_BR[None, :] * next_node_stride_N,
         branch_vals,
         mask=store_mask,
     )
     tl.store(
-        valid_idxs_ptr + offs_B[:, None] * valid_idxs_stride_B + offs_BR[None, :] * valid_idxs_stride_N,
+        valid_idxs_ptr
+        + offs_B[:, None] * valid_idxs_stride_B
+        + offs_BR[None, :] * valid_idxs_stride_N,
         branch_cols,
         mask=store_mask,
     )

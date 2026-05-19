@@ -106,21 +106,23 @@ class _FusedTopKKernel:
     all subsequent calls bypass MLIR re-generation entirely.
     """
 
-    BLOCK_B   = 16   # batch items per thread-block (= half-warps)
-    WARP_SIZE = 16   # threads per dot-product reduction (half-warp)
+    BLOCK_B = 16  # batch items per thread-block (= half-warps)
+    WARP_SIZE = 16  # threads per dot-product reduction (half-warp)
     # BRANCHES_PER_BLOCK is set to max_branches (the bucket) in __init__ so that
     # all branches are handled in a single block, eliminating the 32× A-redundancy
     # that arose when the branch dimension was tiled across grid_y blocks.
 
     def __init__(self, has_bias: bool, max_branches: int, B: int, K: int) -> None:
-        self._has_bias         = has_bias
-        self._max_branches     = max_branches  # stable bucket; never changes per instance
-        self._B                = B             # baked into compiled kernel as Python int
-        self._K                = K             # baked into compiled kernel as Python int
+        self._has_bias = has_bias
+        self._max_branches = max_branches  # stable bucket; never changes per instance
+        self._B = B  # baked into compiled kernel as Python int
+        self._K = K  # baked into compiled kernel as Python int
         # 64 branch iterations × K_PER_LANE=44 = 2,816 unrolled ops — compiles quickly.
         # Reduces grid_y from 32 to 8 (4× less A reloading vs BRANCHES_PER_BLOCK=16).
-        self.BRANCHES_PER_BLOCK = min(64, max_branches) if B > 1024 else min(16, max_branches)
-        self._jit_executor     = None          # populated on first launch(), None until then
+        self.BRANCHES_PER_BLOCK = (
+            min(64, max_branches) if B > 1024 else min(16, max_branches)
+        )
+        self._jit_executor = None  # populated on first launch(), None until then
 
     # -- host-side launcher (JIT-compiled) ----------------------------------
 
@@ -142,12 +144,21 @@ class _FusedTopKKernel:
         # and shape arithmetic compile-time constant. The kernel cache is already
         # keyed on (has_bias, bucket, B, K), so each instance has fixed B/K.
         grid_x = (self._B + self.BLOCK_B - 1) // self.BLOCK_B
-        grid_y = (self._max_branches + self.BRANCHES_PER_BLOCK - 1) // self.BRANCHES_PER_BLOCK
+        grid_y = (
+            self._max_branches + self.BRANCHES_PER_BLOCK - 1
+        ) // self.BRANCHES_PER_BLOCK
 
         self._kernel(
-            a, b, bias,
-            cur_node, row_ptrs, cols, vals,
-            next_node_out, valid_idxs_out, branch_logits_out,
+            a,
+            b,
+            bias,
+            cur_node,
+            row_ptrs,
+            cols,
+            vals,
+            next_node_out,
+            valid_idxs_out,
+            branch_logits_out,
         ).launch(
             grid=(grid_x, grid_y, 1),
             block=(self.WARP_SIZE, self.BLOCK_B, 1),
@@ -172,7 +183,7 @@ class _FusedTopKKernel:
         lane, local_b, _ = cute.arch.thread_idx()
         bidx_x, bidx_y, _ = cute.arch.block_idx()
 
-        batch_idx   = bidx_x * self.BLOCK_B + local_b
+        batch_idx = bidx_x * self.BLOCK_B + local_b
         branch_base = bidx_y * self.BRANCHES_PER_BLOCK
 
         K_PER_LANE = self._K // self.WARP_SIZE
@@ -188,19 +199,19 @@ class _FusedTopKKernel:
             for i in cutlass.range_constexpr(K_PER_LANE):
                 a_cache.append(a[batch_idx, lane + i * self.WARP_SIZE])
 
-            node    = cur_node[batch_idx]
+            node = cur_node[batch_idx]
             node_32 = node.to(cutlass.Int32)
             if node_32 >= 0:
-                row_start  = row_ptrs[node_32]
-                row_end    = row_ptrs[node_32 + 1]
+                row_start = row_ptrs[node_32]
+                row_end = row_ptrs[node_32 + 1]
                 n_children = row_end - row_start
 
                 for j in cutlass.range_constexpr(self.BRANCHES_PER_BLOCK):
                     branch_idx = branch_base + j
                     if branch_idx < n_children.to(cutlass.Int32):
                         offset = row_start.to(cutlass.Int32) + branch_idx
-                        col    = cols[offset]
-                        val    = vals[offset]
+                        col = cols[offset]
+                        val = vals[offset]
                         col_32 = col.to(cutlass.Int32)
 
                         # Dot product using cached register values — a is read
@@ -213,14 +224,19 @@ class _FusedTopKKernel:
                         # Reduce within the WARP_SIZE-wide logical lane group.
                         # Offsets are powers of two from WARP_SIZE/2 down to 1,
                         # keeping communication within the batch item's lane group.
-                        for shfl_offset in [self.WARP_SIZE >> s for s in range(1, int(math.log2(self.WARP_SIZE)) + 1)]:
-                            logit = logit + cute.arch.shuffle_sync_down(logit, shfl_offset)
+                        for shfl_offset in [
+                            self.WARP_SIZE >> s
+                            for s in range(1, int(math.log2(self.WARP_SIZE)) + 1)
+                        ]:
+                            logit = logit + cute.arch.shuffle_sync_down(
+                                logit, shfl_offset
+                            )
 
                         if lane == 0:
                             if self._has_bias:
                                 logit = logit + bias[col_32]
-                            next_node_out[batch_idx, branch_idx]     = val
-                            valid_idxs_out[batch_idx, branch_idx]    = col
+                            next_node_out[batch_idx, branch_idx] = val
+                            valid_idxs_out[batch_idx, branch_idx] = col
                             branch_logits_out[batch_idx, branch_idx] = logit
 
     # -- fast launcher: bypasses MLIR re-generation after first call --------
@@ -244,8 +260,18 @@ class _FusedTopKKernel:
         ``JitExecutor``.  Subsequent calls invoke the executor directly,
         cutting per-call overhead from ~30 ms to ~1.5 ms.
         """
-        args = (a, b, bias, cur_node, row_ptrs, cols, vals,
-                next_node_out, valid_idxs_out, branch_logits_out)
+        args = (
+            a,
+            b,
+            bias,
+            cur_node,
+            row_ptrs,
+            cols,
+            vals,
+            next_node_out,
+            valid_idxs_out,
+            branch_logits_out,
+        )
         if self._jit_executor is None:
             self._jit_executor = self._launch(*args, compile_only=True)
         self._jit_executor(*args)
@@ -308,12 +334,14 @@ def _cute_fused_linear_constrained_node_transition_op(
     """
     B, K = a.shape
 
-    assert cur_node.shape == (B,), f"Expected cur_node shape ({B},), got {cur_node.shape}"
+    assert cur_node.shape == (B,), (
+        f"Expected cur_node shape ({B},), got {cur_node.shape}"
+    )
     assert K % _FusedTopKKernel.WARP_SIZE == 0, (
         f"K={K} must be divisible by WARP_SIZE={_FusedTopKKernel.WARP_SIZE}"
     )
 
-    a        = a.contiguous()
+    a = a.contiguous()
     cur_node = cur_node.contiguous()
     bias_val = bias_val.contiguous()
 
@@ -321,8 +349,8 @@ def _cute_fused_linear_constrained_node_transition_op(
     # C-contiguous, so this is a free view — no device copy.
     b_nk = b.T.contiguous()
 
-    next_node     = cur_node.new_full((B, max_branches), -1)
-    valid_idxs    = cur_node.new_full((B, max_branches), -1)
+    next_node = cur_node.new_full((B, max_branches), -1)
+    valid_idxs = cur_node.new_full((B, max_branches), -1)
     branch_logits = torch.full(
         (B, max_branches), float("-inf"), dtype=torch.float32, device=a.device
     )
@@ -364,8 +392,17 @@ def _cute_fused_linear_constrained_node_transition_topk_op(
 
     Returns ``(next_node, valid_idxs, topk_logits, topk_idxs)``.
     """
-    next_node, valid_idxs, branch_logits = _cute_fused_linear_constrained_node_transition_op(
-        a, b, bias_val, cur_node, csr_row_ptrs, csr_cols_vals, max_branches, has_bias,
+    next_node, valid_idxs, branch_logits = (
+        _cute_fused_linear_constrained_node_transition_op(
+            a,
+            b,
+            bias_val,
+            cur_node,
+            csr_row_ptrs,
+            csr_cols_vals,
+            max_branches,
+            has_bias,
+        )
     )
 
     if k >= max_branches:

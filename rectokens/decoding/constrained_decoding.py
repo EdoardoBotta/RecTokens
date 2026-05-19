@@ -166,7 +166,9 @@ def autoregressive_generate(
     enforcer: Optional[SparseTrieConstraintEnforcer] = None
     if use_sparse_linear and hasattr(model, "get_output_embeddings"):
         output_emb = model.get_output_embeddings()
-        if isinstance(output_emb, nn.Linear) and not isinstance(output_emb, SparseLinear):
+        if isinstance(output_emb, nn.Linear) and not isinstance(
+            output_emb, SparseLinear
+        ):
             enforcer = SparseTrieConstraintEnforcer()
 
     # Auto-select the fused CSR kernel when the caller left it at the default.

@@ -140,7 +140,9 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, diverse_nodes=False):
 
             if gpu_algos:
                 if diverse_nodes:
-                    csr, cur_node = make_csr_diverse(vocab_size=N, max_branches=max_branches, B=B)
+                    csr, cur_node = make_csr_diverse(
+                        vocab_size=N, max_branches=max_branches, B=B
+                    )
                     step = 1
                 else:
                     csr = make_csr(vocab_size=N, max_branches=max_branches)
@@ -287,13 +289,18 @@ if __name__ == "__main__":
     B_vals = [256, 1024, 4096]
     N_vals = [150000]
 
-    print(f"Benchmarking K={K}, sparsity={args.sparsity}, diverse_nodes={args.diverse_nodes}")
+    print(
+        f"Benchmarking K={K}, sparsity={args.sparsity}, diverse_nodes={args.diverse_nodes}"
+    )
     print(f"Algorithms: {args.algorithms}")
     print(f"B_vals={B_vals}")
     print(f"N_vals={N_vals}\n")
 
     df = benchmark_grid(
-        B_vals, N_vals, algorithms=args.algorithms, sparsity=args.sparsity,
+        B_vals,
+        N_vals,
+        algorithms=args.algorithms,
+        sparsity=args.sparsity,
         diverse_nodes=args.diverse_nodes,
     )
     csv_path = "out/bench_vtnk.csv"

@@ -56,7 +56,9 @@ def lex_sort(rows: list[list[int]]) -> torch.Tensor:
 
 def make_csr(vocab_size: int, max_branches: int) -> CompactCSRTrie:
     seqs = [[i] for i in range(max_branches)]
-    csr = CompactCSRTrie.from_sorted_batch(lex_sort(seqs), vocab_size=vocab_size, dense_lookup_layers=0)
+    csr = CompactCSRTrie.from_sorted_batch(
+        lex_sort(seqs), vocab_size=vocab_size, dense_lookup_layers=0
+    )
     return csr._replace(
         row_ptrs=csr.row_ptrs.to(DEVICE),
         stacked_cols_vals=csr.stacked_cols_vals.to(DEVICE),
@@ -76,7 +78,9 @@ def make_csr_diverse(
     """
     num_nodes = min(B, 512)
     seqs = lex_sort([[i, j] for i in range(num_nodes) for j in range(max_branches)])
-    csr = CompactCSRTrie.from_sorted_batch(seqs, vocab_size=vocab_size, dense_lookup_layers=0)
+    csr = CompactCSRTrie.from_sorted_batch(
+        seqs, vocab_size=vocab_size, dense_lookup_layers=0
+    )
     csr = csr._replace(
         row_ptrs=csr.row_ptrs.to(DEVICE),
         stacked_cols_vals=csr.stacked_cols_vals.to(DEVICE),
@@ -103,7 +107,9 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
             print(f"  B={B:6d}  N={N:6d}  max_branches={max_branches}  k={k}")
 
             if diverse_nodes:
-                csr, cur_node = make_csr_diverse(vocab_size=N, max_branches=max_branches, B=B)
+                csr, cur_node = make_csr_diverse(
+                    vocab_size=N, max_branches=max_branches, B=B
+                )
                 step = 1
             else:
                 csr = make_csr(vocab_size=N, max_branches=max_branches)
@@ -116,7 +122,9 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
             cs = ConstraintState(step=step, trie=csr, cur_node=cur_node)
 
             if "cute_topk" in alg_set and not CUTE_DSL_AVAILABLE:
-                print("  [WARNING] cute_topk requested but nvidia-cutlass-dsl not installed — skipping")
+                print(
+                    "  [WARNING] cute_topk requested but nvidia-cutlass-dsl not installed — skipping"
+                )
                 alg_set = alg_set - {"cute_topk"}
 
             needs_sparse = alg_set & {"sparse_pytorch_sample", "sparse_pytorch_topk"}
@@ -151,7 +159,9 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                 if "sparse_pytorch_topk" in alg_set:
                     sparse_pytorch_with_topk()
                 if "cute_topk" in alg_set:
-                    fused_linear_constrained_node_transition_topk_cute(a, weight.T, cs, k=k)
+                    fused_linear_constrained_node_transition_topk_cute(
+                        a, weight.T, cs, k=k
+                    )
 
             record = {"B": B, "N": N}
 
@@ -262,7 +272,9 @@ if __name__ == "__main__":
     B_vals = [256, 1024, 4096]
     N_vals = [150000]
 
-    print(f"Benchmarking K={K}, sparsity={args.sparsity}, topk={args.topk}, diverse_nodes={args.diverse_nodes}")
+    print(
+        f"Benchmarking K={K}, sparsity={args.sparsity}, topk={args.topk}, diverse_nodes={args.diverse_nodes}"
+    )
     print(f"Algorithms: {args.algorithms}")
     print(f"B_vals={B_vals}")
     print(f"N_vals={N_vals}\n")
