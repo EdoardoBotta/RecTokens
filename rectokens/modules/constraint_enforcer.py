@@ -27,61 +27,62 @@ class ConstraintEnforcer(ABC, nn.Module):
 
 
 class SparseTrieConstraintEnforcer(ConstraintEnforcer):
-    """
-    Wraps a model and replaces its output projection with a SparseLinear.
+    """Replaces a model's output projection with a SparseLinear for fused-kernel constraint enforcement.
 
-    Args:
-        attr_path: Dotted path to the output projection layer, e.g. "lm_head".
+    Uses ``model.get_output_embeddings()`` / ``model.set_output_embeddings()`` to locate
+    and swap the layer, so it works with any HF ``PreTrainedModel`` regardless of internal
+    attribute naming, including PEFT-wrapped models and models from the ``adapters`` library.
+
+    Call ``prepare(model)`` before generation and ``restore(model)`` after to leave the
+    model in its original state.
     """
 
-    def __init__(self, attr_path: str):
+    def __init__(self) -> None:
         super().__init__()
-        self.attr_path = attr_path
         self.constrained_linear: Optional[SparseLinear] = None
-
-    @classmethod
-    def convert_to_sparse_linear(cls, model: nn.Module, attr_path: str) -> SparseLinear:
-        """
-        Replace the output projection layer at `attr_path` with a SparseLinear.
-
-        Navigates the dotted attribute path to find the parent module and target
-        attribute, validates the layer is a bias-free nn.Linear, then swaps it
-        in-place.  Returns the SparseLinear that was inserted.
-
-        Args:
-            model:     The model to modify in-place.
-            attr_path: Dotted path to the linear layer, e.g. "lm_head" or
-                       "model.embed_out".
-
-        Returns:
-            The SparseLinear now installed at attr_path.
-
-        Raises:
-            AttributeError: If any component of attr_path does not exist.
-            TypeError:      If the target attribute is not an nn.Linear.
-            ValueError:     If the target nn.Linear has a bias.
-        """
-        parts = attr_path.split(".")
-        parent = model
-        for part in parts[:-1]:
-            parent = getattr(parent, part)
-
-        attr_name = parts[-1]
-        linear = getattr(parent, attr_name)
-
-        if not isinstance(linear, nn.Linear):
-            raise TypeError(
-                f"Expected nn.Linear at '{attr_path}', got {type(linear).__name__}"
-            )
-
-        constrained = SparseLinear(linear)
-        setattr(parent, attr_name, constrained)
-        return constrained
+        self._original_linear: Optional[nn.Linear] = None
 
     def prepare(self, model: nn.Module) -> nn.Module:
-        """Replace the output projection in `model` with a SparseLinear in-place."""
-        self.constrained_linear = self.convert_to_sparse_linear(model, self.attr_path)
+        """Replace the output projection in ``model`` with a SparseLinear in-place.
+
+        Raises:
+            RuntimeError: If called again before :meth:`restore`.
+            RuntimeError: If ``model.get_output_embeddings()`` returns ``None``.
+            TypeError:    If the output embedding is not an ``nn.Linear``.
+        """
+        if self._original_linear is not None:
+            raise RuntimeError(
+                "prepare() already called; call restore() before calling prepare() again"
+            )
+        linear = model.get_output_embeddings()
+        if linear is None:
+            raise RuntimeError("model.get_output_embeddings() returned None")
+        if not isinstance(linear, nn.Linear):
+            raise TypeError(
+                f"Expected nn.Linear from get_output_embeddings(), got {type(linear).__name__}"
+            )
+        self._original_linear = linear
+        sparse = SparseLinear(linear)
+        model.set_output_embeddings(sparse)
+        self.constrained_linear = sparse
         return model
+
+    def restore(self, model: nn.Module) -> None:
+        """Reinstate the original output projection replaced by :meth:`prepare`."""
+        if self._original_linear is None:
+            return
+        model.set_output_embeddings(self._original_linear)
+        self._original_linear = None
+        self.constrained_linear = None
+
+    @contextmanager
+    def apply(self, model: nn.Module):
+        """Context manager that calls :meth:`prepare` on enter and :meth:`restore` on exit."""
+        self.prepare(model)
+        try:
+            yield
+        finally:
+            self.restore(model)
 
     @contextmanager
     def constrained(

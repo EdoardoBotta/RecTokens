@@ -143,40 +143,64 @@ def autoregressive_generate(
     trie: CompactCSRTrie,
     input_ids: torch.Tensor,
     generation_config: GenerationConfig,
-    attr_path: Optional[str] = None,
+    use_sparse_linear: bool = True,
     attention_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Run constrained autoregressive generation for `seq_len` steps.
 
-    When `attr_path` is given, a ConstraintEnforcer is created and applied to
-    the model before generation, replacing the output projection at that path
-    with a SparseLinear in-place.
+    When ``use_sparse_linear=True`` (the default) and ``model.get_output_embeddings()``
+    returns a plain ``nn.Linear``, the output projection is temporarily replaced with a
+    ``SparseLinear`` for the duration of generation and restored afterwards.
+    Pass ``use_sparse_linear=False`` to fall back to standard logit masking without the
+    fused kernel.
+
+    When ``generation_config.csr_kernel`` is ``"default"`` the appropriate fused kernel
+    is selected automatically: ``"topk"`` for beam search (``beam_size > 1``), ``"sample"``
+    for stochastic single-beam decoding (``temperature > 0``), and ``"default"`` otherwise.
+    An explicit kernel choice in the config is always respected.
 
     Returns:
         generated_ids: (B, k, seq_len) tensor of generated token ids.
     """
-    if attr_path is not None:
-        SparseTrieConstraintEnforcer(attr_path).prepare(model)
+    enforcer: Optional[SparseTrieConstraintEnforcer] = None
+    if use_sparse_linear and hasattr(model, "get_output_embeddings"):
+        output_emb = model.get_output_embeddings()
+        if isinstance(output_emb, nn.Linear) and not isinstance(output_emb, SparseLinear):
+            enforcer = SparseTrieConstraintEnforcer()
 
-    state = ConstrainedGenerationState(
-        generation_config=generation_config,
-        generation_state=None,
-        constraint_state=ConstraintState(step=0, trie=trie, cur_node=None),
-    )
+    # Auto-select the fused CSR kernel when the caller left it at the default.
+    # Prefer "topk" for beam search (beam_size > 1); fall back to "sample" for
+    # stochastic single-beam decoding; keep "default" only for greedy single-beam.
+    if enforcer is not None and generation_config.csr_kernel == "default":
+        if generation_config.beam_size > 1:
+            kernel = "topk"
+        elif generation_config.temperature > 0:
+            kernel = "sample"
+        else:
+            kernel = "default"
+        generation_config = generation_config._replace(csr_kernel=kernel)
 
-    for _ in range(generation_config.steps):
-        state = decode_one_step(
-            constrained_generation_state=state,
-            model_fwd=model,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
+    ctx = enforcer.apply(model) if enforcer is not None else contextlib.nullcontext()
+    with ctx:
+        state = ConstrainedGenerationState(
+            generation_config=generation_config,
+            generation_state=None,
+            constraint_state=ConstraintState(step=0, trie=trie, cur_node=None),
         )
-        gen = state.generation_state.generated_ids  # (B, k, step+1)
-        input_ids = gen.reshape(-1, gen.shape[-1])[:, -1:]  # (B*k, 1)
-        attention_mask = None  # subsequent steps use accumulated mask from state
 
-    return state.generation_state.generated_ids
+        for _ in range(generation_config.steps):
+            state = decode_one_step(
+                constrained_generation_state=state,
+                model_fwd=model,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+            gen = state.generation_state.generated_ids  # (B, k, step+1)
+            input_ids = gen.reshape(-1, gen.shape[-1])[:, -1:]  # (B*k, 1)
+            attention_mask = None  # subsequent steps use accumulated mask from state
+
+        return state.generation_state.generated_ids
 
 
 def _reindex_past_key_values(

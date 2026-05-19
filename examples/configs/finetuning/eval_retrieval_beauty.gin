@@ -11,4 +11,3 @@ main.beam_size = 20
 main.encode_batch_size = 512
 main.bf16 = True
 main.seed = 42
-main.attr_path = None

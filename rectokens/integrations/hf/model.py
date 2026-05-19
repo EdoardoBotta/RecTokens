@@ -31,10 +31,6 @@ def _resize_and_initialize(
             embeddings will be resized.
         item_tokenizer: The ``ItemAwareTokenizer`` after token registration.
 
-    Note:
-        ``ConstraintEnforcer`` requires the lm_head to be bias-free.  Most HF
-        decoder models satisfy this; verify before calling
-        ``autoregressive_generate`` with ``attr_path``.
     """
     orig_model_vocab = hf_model.get_input_embeddings().weight.shape[0]
     target_vocab = item_tokenizer.vocab_size
@@ -162,7 +158,7 @@ class ItemAwareCausalLM(PreTrainedModel):
         input_ids: torch.Tensor,
         trie: Optional[CompactCSRTrie] = None,
         generation_config: Optional[GenerationConfig] = None,
-        attr_path: Optional[str] = None,
+        use_sparse_linear: bool = True,
         attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -176,8 +172,11 @@ class ItemAwareCausalLM(PreTrainedModel):
             generation_config: :class:`~rectokens.schemas.config.GenerationConfig`
                 with ``steps``, ``k``, ``beam_size``, ``temperature``.
                 Required when ``trie`` is provided; ignored otherwise.
-            attr_path: Optional attribute path to the lm_head for
-                ``SparseLinear`` constraint enforcement (constrained mode only).
+            use_sparse_linear: When ``True`` (default), temporarily replaces the
+                inner model's output projection with a
+                :class:`~rectokens.modules.sparse_linear.SparseLinear` for
+                fused-kernel constraint enforcement (constrained mode only).
+                Set to ``False`` to fall back to standard logit masking.
             attention_mask: Optional ``(B, seq_len)`` padding mask.
             **kwargs: Forwarded verbatim to ``self.model.generate`` in
                 unconstrained mode (e.g. ``max_new_tokens``, ``do_sample``).
@@ -201,7 +200,7 @@ class ItemAwareCausalLM(PreTrainedModel):
                 trie=trie,
                 input_ids=input_ids,
                 generation_config=generation_config,
-                attr_path=attr_path,
+                use_sparse_linear=use_sparse_linear,
                 attention_mask=attention_mask,
             )
 
