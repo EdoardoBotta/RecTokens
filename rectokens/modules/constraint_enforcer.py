@@ -6,7 +6,7 @@ from typing import Literal, Optional
 from torch import nn
 
 
-class ConstraintEnforcer(ABC, nn.Module):
+class ConstraintEnforcer(ABC):
     @abstractmethod
     def prepare(self, model: nn.Module) -> nn.Module:
         """Modify `model` in-place to enable constraint enforcement."""
@@ -18,12 +18,6 @@ class ConstraintEnforcer(ABC, nn.Module):
     ) -> AbstractContextManager:
         """Context manager that scopes constraint enforcement to one forward pass."""
         ...
-
-    def forward(self, *args, **kwargs):
-        raise NotImplementedError(
-            "ConstraintEnforcer is not a forward model; call .prepare() to prepare a model "
-            "then pass it to autoregressive_generate."
-        )
 
 
 class SparseTrieConstraintEnforcer(ConstraintEnforcer):
@@ -38,7 +32,6 @@ class SparseTrieConstraintEnforcer(ConstraintEnforcer):
     """
 
     def __init__(self) -> None:
-        super().__init__()
         self.constrained_linear: Optional[SparseLinear] = None
         self._original_linear: Optional[nn.Linear] = None
 

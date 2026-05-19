@@ -205,6 +205,35 @@ def autoregressive_generate(
         return state.generation_state.generated_ids
 
 
+def _draw_beam_candidates(
+    logits: torch.Tensor,
+    beam_size: int,
+    temperature: float,
+    constrained_linear: Optional[SparseLinear],
+    use_constrained: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample beam_size candidates per current beam.
+
+    Returns (samples_batched, sampled_log_probas), both shape (current_batch, beam_size).
+    """
+    if use_constrained and constrained_linear.sample is not None:
+        samples_batched = constrained_linear.sample.long().unsqueeze(1)  # (B, 1)
+        sampled_log_probas = torch.zeros(
+            logits.shape[0], 1, dtype=torch.float, device=logits.device
+        )
+    elif use_constrained and constrained_linear.topk_idxs is not None:
+        samples_batched = constrained_linear.topk_idxs  # (B, beam_size) actual token IDs
+        sampled_log_probas = F.log_softmax(logits, dim=-1)  # (B, beam_size)
+    elif temperature == 0.0:
+        _, samples_batched = logits.topk(beam_size, dim=-1)
+        sampled_log_probas = F.log_softmax(logits, dim=-1).gather(1, samples_batched)
+    else:
+        probas_batched = F.softmax(logits / temperature, dim=-1)
+        samples_batched = torch.multinomial(probas_batched, num_samples=beam_size)
+        sampled_log_probas = probas_batched.log().gather(1, samples_batched)
+    return samples_batched, sampled_log_probas
+
+
 def _reindex_past_key_values(
     past_key_values: Optional[tuple], indices: torch.Tensor
 ) -> Optional[tuple]:
@@ -281,9 +310,7 @@ def decode_one_step(
         None if is_first_step else generation_state.generated_ids.reshape(B * k, -1)
     )
 
-    next_node = None
-    next_nodes = None
-    valid_idxs = None
+    next_node = next_nodes = valid_idxs = None
     if step < len(trie.dense_mask_by_layer):
         layer_mask = trie.dense_mask_by_layer[step]
         if is_first_step:
@@ -304,29 +331,9 @@ def decode_one_step(
             )
 
     # Sample beam_size candidates per current beam: (current_batch, beam_size)
-    if use_constrained and constrained_linear.sample is not None:
-        # Fused sampling kernel already drew one token per batch element.
-        samples_batched = constrained_linear.sample.long().unsqueeze(1)  # (B, 1)
-        sampled_log_probas = torch.zeros(
-            current_batch_size, 1, dtype=torch.float, device=logits.device
-        )
-    elif use_constrained and constrained_linear.topk_idxs is not None:
-        # Fused top-k kernel returned the beam_size best token IDs and their logits.
-        # logits here is (B, beam_size) from SparseLinear.forward.
-        samples_batched = (
-            constrained_linear.topk_idxs
-        )  # (B, beam_size) actual token IDs
-        sampled_log_probas = F.log_softmax(logits, dim=-1)  # (B, beam_size)
-    elif config.temperature == 0.0:
-        # Greedy top-k: take the beam_size highest-logit tokens directly.
-        _, samples_batched = logits.topk(beam_size, dim=-1)
-        sampled_log_probas = F.log_softmax(logits, dim=-1).gather(1, samples_batched)
-    else:
-        probas_batched = F.softmax(logits / config.temperature, dim=-1)
-        samples_batched = torch.multinomial(probas_batched, num_samples=beam_size)
-        sampled_log_probas = torch.log(
-            torch.gather(probas_batched, 1, samples_batched)
-        )  # (current_batch, beam_size)
+    samples_batched, sampled_log_probas = _draw_beam_candidates(
+        logits, beam_size, config.temperature, constrained_linear, use_constrained
+    )
 
     if is_first_step:
         # Pick top-k candidates per batch item from beam_size samples
@@ -338,10 +345,7 @@ def decode_one_step(
 
         # Each of the B originals produces k children: parent[b*k + i] = b
         flat_parent_ids = torch.arange(B, device=input_ids.device).repeat_interleave(k)
-
-        # Expand past_key_values to match the new B*k batch size
-        expand_ids = torch.arange(B, device=input_ids.device).repeat_interleave(k)
-        new_past_kv = _reindex_past_key_values(new_past_kv, expand_ids)
+        new_past_kv = _reindex_past_key_values(new_past_kv, flat_parent_ids)
     else:
         assert log_probas is not None
         # Accumulate log-probas across beams: (B, k*beam_size)
