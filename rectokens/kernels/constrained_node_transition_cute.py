@@ -289,7 +289,7 @@ def _get_kernel(has_bias: bool, max_branches: int, B: int, K: int) -> _FusedTopK
 # ---------------------------------------------------------------------------
 
 
-def _cute_fused_linear_constrained_node_transition_topk_op(
+def _cute_fused_linear_constrained_node_transition_op(
     a: torch.Tensor,
     b: torch.Tensor,
     bias_val: torch.Tensor,
@@ -298,14 +298,13 @@ def _cute_fused_linear_constrained_node_transition_topk_op(
     csr_cols_vals: torch.Tensor,
     max_branches: int,
     has_bias: bool,
-    k: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """CuTe DSL fused linear + constrained-node-transition + top-K.
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """CuTe DSL fused linear + constrained-node-transition kernel launcher.
 
     ``b`` must be ``weight.T`` (shape ``[K, N]``); the kernel receives it
     transposed back to ``[N, K]`` for coalesced column access.
 
-    Returns ``(next_node, valid_idxs, topk_logits, topk_idxs)``.
+    Returns ``(next_node, valid_idxs, branch_logits)``.
     """
     B, K = a.shape
 
@@ -342,6 +341,31 @@ def _cute_fused_linear_constrained_node_transition_topk_op(
         from_dlpack(next_node),
         from_dlpack(valid_idxs),
         from_dlpack(branch_logits),
+    )
+
+    return next_node, valid_idxs, branch_logits
+
+
+def _cute_fused_linear_constrained_node_transition_topk_op(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias_val: torch.Tensor,
+    cur_node: torch.Tensor,
+    csr_row_ptrs: torch.Tensor,
+    csr_cols_vals: torch.Tensor,
+    max_branches: int,
+    has_bias: bool,
+    k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Wrapper: CuTe DSL kernel + top-K selection.
+
+    Calls ``_cute_fused_linear_constrained_node_transition_op`` then applies
+    ``torch.topk`` on the branch logits.
+
+    Returns ``(next_node, valid_idxs, topk_logits, topk_idxs)``.
+    """
+    next_node, valid_idxs, branch_logits = _cute_fused_linear_constrained_node_transition_op(
+        a, b, bias_val, cur_node, csr_row_ptrs, csr_cols_vals, max_branches, has_bias,
     )
 
     if k >= max_branches:
