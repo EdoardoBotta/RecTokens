@@ -26,7 +26,6 @@ mdurl==0.1.2
 mpmath==1.3.0
 multidict==6.7.1
 networkx==3.6.1
-nvidia-cutlass==4.2.0.0
 numpy==2.4.2
 pandas==3.0.1
 pillow==12.1.1
