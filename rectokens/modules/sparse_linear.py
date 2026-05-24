@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from rectokens.ops.constrained_node_transition import (
     fused_linear_constrained_node_transition,
     fused_linear_constrained_node_transition_sampling,
-    fused_linear_constrained_node_transition_topk_cute,
+    fused_linear_constrained_node_transition_topk,
 )
 from rectokens.schemas.state import ConstraintState
 from torch import nn
@@ -76,7 +76,7 @@ class SparseLinear(nn.Module):
 
         if self._strategy == "topk":
             next_nodes, valid_idxs, topk_logits, topk_idxs = (
-                fused_linear_constrained_node_transition_topk_cute(
+                fused_linear_constrained_node_transition_topk(
                     x,
                     w,
                     self._ctx,

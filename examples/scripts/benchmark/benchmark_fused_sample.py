@@ -24,10 +24,8 @@ from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 from rectokens.schemas.state import ConstraintState
 from rectokens.decoding.vntk import sparse_linear_pytorch, sparse_linear_compact_pytorch
 from rectokens.ops.constrained_node_transition import (
-    CUTE_DSL_AVAILABLE,
     fused_linear_constrained_node_transition_sampling,
     fused_linear_constrained_node_transition_topk,
-    fused_linear_constrained_node_transition_topk_cute,
 )
 
 DEVICE = torch.device("cuda")
@@ -42,11 +40,9 @@ ALL_ALGORITHMS = [
     "fused_topk",
     "sparse_pytorch_topk",
     "sparse_pytorch_topk_compact",
-    "cute_topk",
 ]
 DEFAULT_ALGORITHMS = [
     "fused_topk",
-    "cute_topk",
     "sparse_pytorch_topk",
     "sparse_pytorch_topk_compact",
 ]
@@ -124,12 +120,6 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
 
             cs = ConstraintState(step=step, trie=csr, cur_node=cur_node)
 
-            if "cute_topk" in alg_set and not CUTE_DSL_AVAILABLE:
-                print(
-                    "  [WARNING] cute_topk requested but nvidia-cutlass-dsl not installed — skipping"
-                )
-                alg_set = alg_set - {"cute_topk"}
-
             needs_sparse_full = alg_set & {"sparse_pytorch_sample", "sparse_pytorch_topk"}
             needs_sparse_compact = "sparse_pytorch_topk_compact" in alg_set
             if needs_sparse_full:
@@ -182,11 +172,6 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                     sparse_pytorch_with_topk()
                 if "sparse_pytorch_topk_compact" in alg_set:
                     sparse_pytorch_compact_with_topk()
-                if "cute_topk" in alg_set:
-                    fused_linear_constrained_node_transition_topk_cute(
-                        a, weight.T, cs, k=k
-                    )
-
             record = {"B": B, "N": N}
 
             # --- benchmark ---
@@ -215,13 +200,6 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                     record["ms_sparse_pytorch_topk_compact"] = run_bench(
                         sparse_pytorch_compact_with_topk
                     )
-                if "cute_topk" in alg_set:
-                    record["ms_cute_topk"] = run_bench(
-                        lambda: fused_linear_constrained_node_transition_topk_cute(
-                            a, weight.T, cs, k=k
-                        )
-                    )
-
             if "fused_sample" in alg_set and "sparse_pytorch_sample" in alg_set:
                 record["speedup_fused_vs_sparse_pytorch_sample"] = (
                     record["ms_sparse_pytorch_sample"] / record["ms_fused_sample"]
@@ -238,11 +216,6 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                 record["speedup_compact_vs_full_pytorch_topk"] = (
                     record["ms_sparse_pytorch_topk"] / record["ms_sparse_pytorch_topk_compact"]
                 )
-            if "cute_topk" in alg_set and "fused_topk" in alg_set:
-                record["speedup_cute_topk_vs_triton_topk"] = (
-                    record["ms_fused_topk"] / record["ms_cute_topk"]
-                )
-
             records.append(record)
 
     return pd.DataFrame(records)
@@ -360,12 +333,4 @@ if __name__ == "__main__":
             title=f"Compact pytorch top-k speedup vs full (B,N) pytorch top-k  (K={K}, k={args.topk})",
             filename="out/heatmap_compact_vs_full_pytorch_topk.jpg",
             cbar_label="Speedup (>1 = compact faster)",
-        )
-    if "speedup_cute_topk_vs_triton_topk" in df.columns:
-        plot_heatmap(
-            df,
-            value_col="speedup_cute_topk_vs_triton_topk",
-            title=f"CuTe top-k speedup vs Triton top-k  (K={K}, k={args.topk})",
-            filename="out/heatmap_cute_vs_triton_cst_topk.jpg",
-            cbar_label="Speedup (>1 = CuTe faster)",
         )
