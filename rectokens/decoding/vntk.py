@@ -25,7 +25,8 @@ def _sparse_branch_logits(a, weight, cur_node, trie, step):
 
     clamped_idxs = valid_idxs.clamp(min=0)  # (B, max_branches)
     valid_weights = weight[clamped_idxs]  # (B, max_branches, K)
-    logits = (a.unsqueeze(1) * valid_weights).sum(dim=-1)  # (B, max_branches)
+    # Multiply in bf16, accumulate in fp32 — matches the Triton kernel's compute pattern.
+    logits = (a.unsqueeze(1) * valid_weights).to(torch.float32).sum(dim=-1)  # (B, max_branches)
     branch_logits = torch.where(valid_range, logits, float("-inf"))
 
     return next_node, valid_idxs, branch_logits
