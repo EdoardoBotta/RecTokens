@@ -42,9 +42,8 @@ ALL_ALGORITHMS = [
     "sparse_pytorch_topk_compact",
 ]
 DEFAULT_ALGORITHMS = [
-    "fused_topk",
-    "sparse_pytorch_topk",
-    "sparse_pytorch_topk_compact",
+    "fused_sample",
+    "sparse_pytorch_sample",
 ]
 DEFAULT_SPARSITY = 0.01
 

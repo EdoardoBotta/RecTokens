@@ -187,6 +187,8 @@ _FUSED_AUTOTUNE_CONFIGS = [
     # triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 64}),
     # triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 64}),
 ]
+# Minimum BLOCK_BRANCHES across _FUSED_AUTOTUNE_CONFIGS; used to bound max_br_blocks at allocation time.
+_FUSED_MIN_BLOCK_BRANCHES = 4
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -223,53 +225,6 @@ def _select_branch(
     )
     return br_sel, col_k, c_mask
 
-
-@triton.jit
-def _extract_branch(
-    local_br: tl.constexpr,
-    branch_cols,  # [BLOCK_B, BLOCK_BRANCHES]
-    branch_vals,  # [BLOCK_B, BLOCK_BRANCHES]
-    branch_valid,  # [BLOCK_B, BLOCK_BRANCHES]
-    logits,  # [BLOCK_B, BLOCK_BRANCHES]
-    BLOCK_BRANCHES: tl.constexpr,
-):
-    """Return (col_k, val_k, c_mask, logit_k) — all [BLOCK_B] — for branch slot local_br."""
-    br_sel, col_k, c_mask = _select_branch(
-        local_br, branch_cols, branch_valid, BLOCK_BRANCHES
-    )
-    val_k = tl.sum(tl.where(br_sel[None, :], branch_vals, 0), axis=1)
-    logit_k = tl.sum(tl.where(br_sel[None, :], logits, 0.0), axis=1)
-    return col_k, val_k, c_mask, logit_k
-
-
-@triton.jit
-def _store_branch_outputs(
-    offs_B,
-    b_mask,
-    in_range,
-    branch_idx,
-    col_k,
-    val_k,
-    next_node_ptr,
-    next_node_stride_B,
-    next_node_stride_N,
-    valid_idxs_ptr,
-    valid_idxs_stride_B,
-    valid_idxs_stride_N,
-):
-    """Write val_k → next_node and col_k → valid_idxs for one branch slot."""
-    tl.store(
-        next_node_ptr + offs_B * next_node_stride_B + branch_idx * next_node_stride_N,
-        val_k,
-        mask=b_mask & in_range,
-    )
-    tl.store(
-        valid_idxs_ptr
-        + offs_B * valid_idxs_stride_B
-        + branch_idx * valid_idxs_stride_N,
-        col_k,
-        mask=b_mask & in_range,
-    )
 
 
 @triton.jit
@@ -357,29 +312,6 @@ def _compute_branch_logits(
 
     return branch_cols, branch_vals, branch_valid, logits
 
-
-@triton.jit
-def _gumbel_max_update(
-    rng_seed,
-    offs_B,
-    max_branches,
-    branch_idx,
-    logit_k,
-    temperature,
-    child_mask,
-    col_k,
-    block_sample,
-    block_max_gumbel,
-):
-    # See: https://arxiv.org/pdf/2603.15854
-    u = tl.rand(seed=rng_seed, offset=offs_B * max_branches + branch_idx)
-    gumbel = -tl.log(-tl.log(u + 1e-10) + 1e-10)
-    g_k = tl.where(child_mask, logit_k / temperature + gumbel, float("-inf"))
-    improved = g_k > block_max_gumbel
-    return (
-        tl.where(improved, col_k.to(tl.float32), block_sample),
-        tl.where(improved, g_k, block_max_gumbel),
-    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -522,37 +454,29 @@ def _fused_sparse_linear_constrained_node_transition_kernel(
         HAS_BIAS,
     )
 
+    # next_node and valid_idxs are indexed contiguously by branch slot — store as 2D blocks.
+    store_mask = b_mask[:, None] & (offs_BR[None, :] < max_branches)
+    tl.store(
+        next_node_ptr + offs_B[:, None] * next_node_stride_B + offs_BR[None, :] * next_node_stride_N,
+        branch_vals,
+        mask=store_mask,
+    )
+    tl.store(
+        valid_idxs_ptr + offs_B[:, None] * valid_idxs_stride_B + offs_BR[None, :] * valid_idxs_stride_N,
+        branch_cols,
+        mask=store_mask,
+    )
+
+    # corrected_logits is indexed by token column (scattered) — requires per-branch loop.
     for local_br in tl.static_range(BLOCK_BRANCHES):
-        branch_idx = pid_BR * BLOCK_BRANCHES + local_br
-        in_range = branch_idx < max_branches
-        col_k, val_k, c_mask, logit_k = _extract_branch(
-            local_br,
-            branch_cols,
-            branch_vals,
-            branch_valid,
-            logits,
-            BLOCK_BRANCHES,
-        )
+        br_sel, col_k, c_mask = _select_branch(local_br, branch_cols, branch_valid, BLOCK_BRANCHES)
+        logit_k = tl.sum(tl.where(br_sel[None, :], logits, 0.0), axis=1)
         tl.store(
             corrected_logits_ptr
             + offs_B * corrected_logits_stride_B
             + col_k * corrected_logits_stride_N,
             logit_k.to(tl.bfloat16),
             mask=c_mask,
-        )
-        _store_branch_outputs(
-            offs_B,
-            b_mask,
-            in_range,
-            branch_idx,
-            col_k,
-            val_k,
-            next_node_ptr,
-            next_node_stride_B,
-            next_node_stride_N,
-            valid_idxs_ptr,
-            valid_idxs_stride_B,
-            valid_idxs_stride_N,
         )
 
 
@@ -596,10 +520,15 @@ def _fused_linear_constrained_node_transition_sampling_op(
 
     next_node = cur_node.new_full((B, max_branches), -1)
     valid_idxs = cur_node.new_full((B, max_branches), -1)
-    sample = torch.full((B,), -1.0, dtype=torch.float32, device=a.device)
-    gumbel_max = torch.full((B,), float("-inf"), dtype=torch.float32, device=a.device)
-    num_locks = triton.cdiv(B, 16)
-    locks = torch.zeros(num_locks, dtype=torch.int32, device=a.device)
+    # Worst-case block count uses the minimum BLOCK_BRANCHES across all autotune configs.
+    # Configs with larger BLOCK_BRANCHES write fewer entries; unused slots stay at -inf/-1.
+    max_br_blocks = triton.cdiv(max_branches, _FUSED_MIN_BLOCK_BRANCHES)
+    gumbel_block_max = torch.full(
+        (B, max_br_blocks), float("-inf"), dtype=torch.float32, device=a.device
+    )
+    block_sample_buf = torch.full(
+        (B, max_br_blocks), -1.0, dtype=torch.float32, device=a.device
+    )
 
     grid = lambda meta: (
         triton.cdiv(B, meta["BLOCK_B"]),
@@ -613,9 +542,6 @@ def _fused_linear_constrained_node_transition_sampling_op(
         csr_trie_row_ptr=csr_row_ptrs,
         csr_trie_cols_vals_ptr=csr_cols_vals,
         temperature_ptr=temperature,
-        gumbel_max_ptr=gumbel_max,
-        locks_ptr=locks,
-        num_locks=num_locks,
         a_stride_B=a.stride(0),
         a_stride_K=a.stride(1),
         b_stride_K=b.stride(0),
@@ -623,30 +549,29 @@ def _fused_linear_constrained_node_transition_sampling_op(
         cols_vals_stride_0=csr_cols_vals.stride(0),
         next_node_ptr=next_node,
         valid_idxs_ptr=valid_idxs,
-        sample_ptr=sample,
+        gumbel_block_max_ptr=gumbel_block_max,
+        block_sample_ptr=block_sample_buf,
         next_node_stride_B=next_node.stride(0),
         next_node_stride_N=next_node.stride(1),
         valid_idxs_stride_B=valid_idxs.stride(0),
         valid_idxs_stride_N=valid_idxs.stride(1),
+        max_br_blocks=max_br_blocks,
         rng_seed=rng_seed,
         B=B,
         K=K,
         max_branches=max_branches,
         HAS_BIAS=has_bias,
     )
+
+    argmax = torch.max(gumbel_block_max, dim=1).indices  # [B]
+    sample = block_sample_buf.gather(1, argmax.unsqueeze(1)).squeeze(1)
     return next_node, valid_idxs, sample
 
 
 @triton.autotune(
     configs=_FUSED_AUTOTUNE_CONFIGS,
     key=["B", "K", "max_branches"],
-    restore_value=[
-        "next_node_ptr",
-        "valid_idxs_ptr",
-        "sample_ptr",
-        "gumbel_max_ptr",
-        "locks_ptr",
-    ],
+    restore_value=["next_node_ptr", "valid_idxs_ptr", "gumbel_block_max_ptr", "block_sample_ptr"],
 )
 @triton.jit
 def _fused_sparse_linear_constrained_node_transition_sampling_kernel(
@@ -658,9 +583,6 @@ def _fused_sparse_linear_constrained_node_transition_sampling_kernel(
     csr_trie_row_ptr,
     csr_trie_cols_vals_ptr,
     temperature_ptr,
-    gumbel_max_ptr,
-    locks_ptr,
-    num_locks,
     a_stride_B,
     a_stride_K,
     b_stride_K,
@@ -669,11 +591,13 @@ def _fused_sparse_linear_constrained_node_transition_sampling_kernel(
     # Outputs
     next_node_ptr,
     valid_idxs_ptr,
-    sample_ptr,
+    gumbel_block_max_ptr,
+    block_sample_ptr,
     next_node_stride_B,
     next_node_stride_N,
     valid_idxs_stride_B,
     valid_idxs_stride_N,
+    max_br_blocks,
     rng_seed,
     # Constants
     B: tl.constexpr,
@@ -718,71 +642,39 @@ def _fused_sparse_linear_constrained_node_transition_sampling_kernel(
         HAS_BIAS,
     )
 
+    # next_node and valid_idxs are contiguous by branch slot — store as 2D blocks, no loop.
+    store_mask = b_mask[:, None] & (offs_BR[None, :] < max_branches)
+    tl.store(
+        next_node_ptr + offs_B[:, None] * next_node_stride_B + offs_BR[None, :] * next_node_stride_N,
+        branch_vals,
+        mask=store_mask,
+    )
+    tl.store(
+        valid_idxs_ptr + offs_B[:, None] * valid_idxs_stride_B + offs_BR[None, :] * valid_idxs_stride_N,
+        branch_cols,
+        mask=store_mask,
+    )
+
+    # Vectorized Gumbel-max over the full [BLOCK_B, BLOCK_BRANCHES] block — registers only, no sync.
+    # See: https://arxiv.org/pdf/2603.15854
     temperature = tl.load(temperature_ptr)
-    block_max_gumbel = tl.full((BLOCK_B,), float("-inf"), dtype=tl.float32)
-    block_sample = tl.full((BLOCK_B,), -1.0, dtype=tl.float32)
+    u = tl.rand(seed=rng_seed, offset=offs_B[:, None] * max_branches + offs_BR[None, :])
+    gumbel = -tl.log(-tl.log(u + 1e-10) + 1e-10)
+    g_vals = tl.where(branch_valid, logits / temperature + gumbel, float("-inf"))
+    block_max_gumbel = tl.max(g_vals, axis=1)  # [BLOCK_B]
 
-    for local_br in tl.static_range(BLOCK_BRANCHES):
-        branch_idx = pid_BR * BLOCK_BRANCHES + local_br
-        in_range = branch_idx < max_branches
-        col_k, val_k, c_mask, logit_k = _extract_branch(
-            local_br,
-            branch_cols,
-            branch_vals,
-            branch_valid,
-            logits,
-            BLOCK_BRANCHES,
-        )
-        _store_branch_outputs(
-            offs_B,
-            b_mask,
-            in_range,
-            branch_idx,
-            col_k,
-            val_k,
-            next_node_ptr,
-            next_node_stride_B,
-            next_node_stride_N,
-            valid_idxs_ptr,
-            valid_idxs_stride_B,
-            valid_idxs_stride_N,
-        )
-        block_sample, block_max_gumbel = _gumbel_max_update(
-            rng_seed,
-            offs_B,
-            max_branches,
-            branch_idx,
-            logit_k,
-            temperature,
-            c_mask,
-            col_k,
-            block_sample,
-            block_max_gumbel,
-        )
+    # Recover winning token: exactly one winner per batch element (gumbel ties are negligible).
+    is_winner = (g_vals == block_max_gumbel[:, None]) & branch_valid
+    block_sample = tl.sum(tl.where(is_winner, branch_cols.to(tl.float32), 0.0), axis=1)
 
-    # Cross-block Gumbel-max reduction: spinlock protects per-batch-block update.
-    # tl.atomic_max on float32 is not correct for negative values, so we use a
-    # compare-and-store pattern under the lock instead.
-    lock_ptr = locks_ptr + pid_B // tl.cdiv(B, BLOCK_B * num_locks)
-    while tl.atomic_cas(lock_ptr, 0, 1) == 1:
-        pass
-
-    cur_max = tl.load(gumbel_max_ptr + offs_B, mask=b_mask, other=float("-inf"))
-    improved_global = block_max_gumbel > cur_max
+    # One write per (batch, branch-block) — unique addresses, no lock needed.
+    # Skip block_sample write when no valid branch exists; buf retains its -1.0 init value.
+    tl.store(gumbel_block_max_ptr + offs_B * max_br_blocks + pid_BR, block_max_gumbel, mask=b_mask)
     tl.store(
-        gumbel_max_ptr + offs_B,
-        tl.where(improved_global, block_max_gumbel, cur_max),
-        mask=b_mask,
+        block_sample_ptr + offs_B * max_br_blocks + pid_BR,
+        block_sample,
+        mask=b_mask & (block_max_gumbel > float("-inf")),
     )
-    cur_sample = tl.load(sample_ptr + offs_B, mask=b_mask, other=-1.0)
-    tl.store(
-        sample_ptr + offs_B,
-        tl.where(improved_global, block_sample, cur_sample),
-        mask=b_mask,
-    )
-
-    tl.debug_barrier()
-    tl.atomic_xchg(lock_ptr, 0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
