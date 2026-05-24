@@ -31,8 +31,8 @@ K = 512
 WARMUP = 25
 REP = 100
 
-ALL_ALGORITHMS = ["fused", "kernel", "pytorch", "sparse_pytorch", "trie_cpu"]
-DEFAULT_ALGORITHMS = ["fused", "kernel", "pytorch", "sparse_pytorch"]
+ALL_ALGORITHMS = ["fused", "kernel", "pytorch", "sparse_pytorch", "dense_lookup", "trie_cpu"]
+DEFAULT_ALGORITHMS = ["fused", "kernel", "pytorch", "sparse_pytorch", "dense_lookup"]
 DEFAULT_SPARSITY = 0.01
 
 torch.set_float32_matmul_precision("high")
@@ -105,6 +105,58 @@ def trie_cpu_traversal(
     return mask
 
 
+def _dense_lookup_inner(a: torch.Tensor, weight: torch.Tensor, mask1d: torch.Tensor) -> torch.Tensor:
+    """Full linear + dense boolean mask — the hot path wrapped by torch.compile."""
+    logits = (a @ weight.T).float()
+    return logits.masked_fill(~mask1d.unsqueeze(0), float("-inf"))
+
+
+_dense_lookup_compiled = torch.compile(_dense_lookup_inner)
+
+
+def dense_lookup_pytorch(
+    a: torch.Tensor, weight: torch.Tensor, cur_node: torch.Tensor, csr, step: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Full dense linear + dense mask lookup.
+
+    Computes the full logit vector (a @ weight.T) via torch.compile, then masks
+    invalid tokens using csr.dense_mask_by_layer[step].  Valid branch indices and
+    next-node IDs are looked up from csr.dense_states (no CSR scatter needed).
+
+    Only supports step=0 (all batch items at the root node); incompatible with
+    --diverse-nodes because step=1 requires the previous-token path to index the
+    2-D dense_mask_by_layer, which is not stored in cur_node.
+
+    Returns (next_node, valid_idxs, corrected_logits) matching vtnk_pytorch output:
+      next_node:        (B, max_branches) int64 — child BFS IDs, -1 for padding
+      valid_idxs:       (B, max_branches) int64 — valid token indices, -1 for padding
+      corrected_logits: (B, N)           float32 — logits, -inf for invalid tokens
+    """
+    device = a.device
+    B = a.shape[0]
+
+    mask1d: torch.Tensor = csr.dense_mask_by_layer[step]  # [N]
+    corrected_logits = _dense_lookup_compiled(a, weight, mask1d)  # [B, N]
+
+    # Pack valid_idxs and next_node from dense_states — no CSR traversal needed.
+    # dense_states is 1-D for dense_lookup_layers=1 (the step=0 case):
+    #   dense_states[tok] = BFS node ID of the child reached by tok from root.
+    max_branches = csr.layer_max_branches[step]
+    valid_toks = mask1d.nonzero(as_tuple=True)[0]  # [n_valid]
+    n_valid = valid_toks.shape[0]
+
+    padded_valid = valid_toks.new_full((max_branches,), -1)
+    padded_valid[:n_valid] = valid_toks
+
+    padded_next = valid_toks.new_full((max_branches,), -1)
+    padded_next[:n_valid] = csr.dense_states[valid_toks]
+
+    valid_idxs = padded_valid.unsqueeze(0).expand(B, -1)
+    next_node = padded_next.unsqueeze(0).expand(B, -1)
+
+    return next_node, valid_idxs, corrected_logits
+
+
 def run_bench(fn):
     return testing.do_bench(fn, warmup=WARMUP, rep=REP)
 
@@ -124,7 +176,7 @@ def run_bench_cpu(fn, warmup: int = WARMUP, rep: int = REP) -> float:
 
 def benchmark_grid(B_vals, N_vals, algorithms, sparsity, diverse_nodes=False):
     alg_set = set(algorithms)
-    gpu_algos = alg_set & {"fused", "kernel", "pytorch", "sparse_pytorch"}
+    gpu_algos = alg_set & {"fused", "kernel", "pytorch", "sparse_pytorch", "dense_lookup"}
     max_B, max_N = max(B_vals), max(N_vals)
     records = []
 
@@ -135,8 +187,13 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, diverse_nodes=False):
 
             # CPU traversal is too slow to run at the highest N and B values,
             # and incompatible with diverse_nodes (requires a deeper Trie object).
+            # dense_lookup requires step=0 (all batch items at root); diverse_nodes
+            # uses step=1 where the 2-D dense mask must be indexed by prev_token.
             skip_cpu = B == max_B or N == max_N or diverse_nodes
-            active_alg_set = alg_set - ({"trie_cpu"} if skip_cpu else set())
+            skip_algos = {"trie_cpu"} if skip_cpu else set()
+            if diverse_nodes:
+                skip_algos.add("dense_lookup")
+            active_alg_set = alg_set - skip_algos
 
             if gpu_algos:
                 if diverse_nodes:
@@ -180,6 +237,8 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, diverse_nodes=False):
                     vtnk_pytorch(linear(a), cur_node, csr, step=step)
                 if "sparse_pytorch" in active_alg_set:
                     sparse_linear_pytorch_compiled(a, weight, cur_node, csr, step=step)
+                if "dense_lookup" in active_alg_set:
+                    dense_lookup_pytorch(a, weight, cur_node, csr, step=step)
 
             record = {"B": B, "N": N}
 
@@ -205,6 +264,10 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, diverse_nodes=False):
                             a, weight, cur_node, csr, step=step
                         )
                     )
+                if "dense_lookup" in active_alg_set:
+                    record["ms_dense_lookup"] = run_bench(
+                        lambda: dense_lookup_pytorch(a, weight, cur_node, csr, step=step)
+                    )
             if "trie_cpu" in active_alg_set:
                 record["ms_trie_cpu"] = run_bench_cpu(
                     lambda: trie_cpu_traversal(cur_node_cpu, trie_nodes, N)
@@ -225,6 +288,10 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, diverse_nodes=False):
             if "fused" in active_alg_set and "trie_cpu" in active_alg_set:
                 record["speedup_fused_vs_trie_cpu"] = (
                     record["ms_trie_cpu"] / record["ms_fused"]
+                )
+            if "fused" in active_alg_set and "dense_lookup" in active_alg_set:
+                record["speedup_fused_vs_dense_lookup"] = (
+                    record["ms_dense_lookup"] / record["ms_fused"]
                 )
 
             records.append(record)
@@ -339,5 +406,13 @@ if __name__ == "__main__":
             value_col="speedup_fused_vs_trie_cpu",
             title=f"Fused speedup vs CPU trie traversal  (K={K})",
             filename="out/heatmap_fused_vs_trie_cpu.jpg",
+            cbar_label="Speedup (>1 = fused faster)",
+        )
+    if "speedup_fused_vs_dense_lookup" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_fused_vs_dense_lookup",
+            title=f"Fused speedup vs dense_lookup  (K={K})",
+            filename="out/heatmap_fused_vs_dense_lookup.jpg",
             cbar_label="Speedup (>1 = fused faster)",
         )

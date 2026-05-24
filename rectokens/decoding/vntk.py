@@ -1,14 +1,15 @@
 import torch
 
 
-def sparse_linear_pytorch(a, weight, cur_node, trie, step):
-    """
-    PyTorch impl that only computes logits for valid (constrained) tokens.
-    weight shape: (N, K)  — standard nn.Linear weight layout.
+def _sparse_branch_logits(a, weight, cur_node, trie, step):
+    """Shared inner: trie traversal + dot products for valid branches only.
+
+    Returns (next_node, valid_idxs, branch_logits) where branch_logits has
+    shape (B, max_branches) with -inf padding — no (B, N) scatter.
+    weight shape: (N, K) — standard nn.Linear weight layout.
     """
     device = trie.row_ptrs.device
     B, K = a.shape
-    N = weight.shape[0]
 
     idx_start = trie.row_ptrs[cur_node]
     n_children = trie.row_ptrs[cur_node + 1] - idx_start
@@ -22,20 +23,47 @@ def sparse_linear_pytorch(a, weight, cur_node, trie, step):
     valid_idxs = torch.where(valid_range, cols, -1)
     next_node = torch.where(valid_range, vals, -1)
 
-    # Gather weight rows for valid tokens only, compute dot products
     clamped_idxs = valid_idxs.clamp(min=0)  # (B, max_branches)
     valid_weights = weight[clamped_idxs]  # (B, max_branches, K)
-    logits_valid = (a.unsqueeze(1) * valid_weights).sum(dim=-1)  # (B, max_branches)
+    logits = (a.unsqueeze(1) * valid_weights).sum(dim=-1)  # (B, max_branches)
+    branch_logits = torch.where(valid_range, logits, float("-inf"))
 
-    # Scatter results into full logits tensor (rest stays -inf)
+    return next_node, valid_idxs, branch_logits
+
+
+def sparse_linear_pytorch(a, weight, cur_node, trie, step):
+    """
+    PyTorch impl that only computes logits for valid (constrained) tokens.
+    weight shape: (N, K)  — standard nn.Linear weight layout.
+    """
+    device = trie.row_ptrs.device
+    B = a.shape[0]
+    N = weight.shape[0]
+
+    next_node, valid_idxs, branch_logits = _sparse_branch_logits(
+        a, weight, cur_node, trie, step
+    )
+
+    # Scatter compact logits into full (B, N) tensor (rest stays -inf)
     corrected_logits = torch.full(
         (B, N), float("-inf"), dtype=torch.float32, device=device
     )
     b_idx = torch.arange(B, device=device).unsqueeze(-1).expand_as(valid_idxs)
     valid = valid_idxs >= 0
-    corrected_logits[b_idx[valid], valid_idxs[valid]] = logits_valid[valid]
+    corrected_logits[b_idx[valid], valid_idxs[valid]] = branch_logits[valid]
 
     return next_node, valid_idxs, corrected_logits
+
+
+def sparse_linear_compact_pytorch(a, weight, cur_node, trie, step):
+    """Like sparse_linear_pytorch but skips the (B, N) scatter.
+
+    Returns (next_node, valid_idxs, branch_logits) where branch_logits has
+    shape (B, max_branches). Avoids allocating the full vocab-sized logit
+    matrix — top-k can be applied directly on the compact buffer.
+    weight shape: (N, K)  — standard nn.Linear weight layout.
+    """
+    return _sparse_branch_logits(a, weight, cur_node, trie, step)
 
 
 def vtnk_pytorch(logits, cur_node, trie, step):

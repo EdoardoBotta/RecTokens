@@ -22,7 +22,7 @@ import pandas as pd
 
 from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 from rectokens.schemas.state import ConstraintState
-from rectokens.decoding.vntk import sparse_linear_pytorch
+from rectokens.decoding.vntk import sparse_linear_pytorch, sparse_linear_compact_pytorch
 from rectokens.ops.constrained_node_transition import (
     CUTE_DSL_AVAILABLE,
     fused_linear_constrained_node_transition_sampling,
@@ -41,11 +41,14 @@ ALL_ALGORITHMS = [
     "sparse_pytorch_sample",
     "fused_topk",
     "sparse_pytorch_topk",
+    "sparse_pytorch_topk_compact",
     "cute_topk",
 ]
 DEFAULT_ALGORITHMS = [
     "fused_topk",
     "cute_topk",
+    "sparse_pytorch_topk",
+    "sparse_pytorch_topk_compact",
 ]
 DEFAULT_SPARSITY = 0.01
 
@@ -127,9 +130,21 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                 )
                 alg_set = alg_set - {"cute_topk"}
 
-            needs_sparse = alg_set & {"sparse_pytorch_sample", "sparse_pytorch_topk"}
-            if needs_sparse:
+            needs_sparse_full = alg_set & {"sparse_pytorch_sample", "sparse_pytorch_topk"}
+            needs_sparse_compact = "sparse_pytorch_topk_compact" in alg_set
+            if needs_sparse_full:
                 sparse_linear_pytorch_compiled = torch.compile(sparse_linear_pytorch)
+            if needs_sparse_compact:
+
+                def _sparse_compact_topk(a, weight, cur_node, csr, step, k):
+                    nn, vi, branch_logits = sparse_linear_compact_pytorch(
+                        a, weight, cur_node, csr, step
+                    )
+                    topk_logits, topk_branch_idxs = torch.topk(branch_logits, k, dim=-1)
+                    topk_idxs = vi.gather(1, topk_branch_idxs)
+                    return nn, vi, topk_logits, topk_idxs
+
+                sparse_compact_topk_compiled = torch.compile(_sparse_compact_topk)
 
             if "sparse_pytorch_sample" in alg_set:
 
@@ -148,6 +163,13 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                     )
                     return torch.topk(corrected_logits, k, dim=-1)
 
+            if needs_sparse_compact:
+
+                def sparse_pytorch_compact_with_topk():
+                    return sparse_compact_topk_compiled(
+                        a, weight, cur_node, csr, step, k
+                    )
+
             # --- warmup / force compilation ---
             with torch.no_grad():
                 if "fused_sample" in alg_set:
@@ -158,6 +180,8 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                     fused_linear_constrained_node_transition_topk(a, weight.T, cs, k=k)
                 if "sparse_pytorch_topk" in alg_set:
                     sparse_pytorch_with_topk()
+                if "sparse_pytorch_topk_compact" in alg_set:
+                    sparse_pytorch_compact_with_topk()
                 if "cute_topk" in alg_set:
                     fused_linear_constrained_node_transition_topk_cute(
                         a, weight.T, cs, k=k
@@ -187,6 +211,10 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                     record["ms_sparse_pytorch_topk"] = run_bench(
                         sparse_pytorch_with_topk
                     )
+                if "sparse_pytorch_topk_compact" in alg_set:
+                    record["ms_sparse_pytorch_topk_compact"] = run_bench(
+                        sparse_pytorch_compact_with_topk
+                    )
                 if "cute_topk" in alg_set:
                     record["ms_cute_topk"] = run_bench(
                         lambda: fused_linear_constrained_node_transition_topk_cute(
@@ -201,6 +229,14 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
             if "fused_topk" in alg_set and "sparse_pytorch_topk" in alg_set:
                 record["speedup_fused_topk_vs_sparse_pytorch_topk"] = (
                     record["ms_sparse_pytorch_topk"] / record["ms_fused_topk"]
+                )
+            if "fused_topk" in alg_set and "sparse_pytorch_topk_compact" in alg_set:
+                record["speedup_fused_topk_vs_sparse_pytorch_topk_compact"] = (
+                    record["ms_sparse_pytorch_topk_compact"] / record["ms_fused_topk"]
+                )
+            if "sparse_pytorch_topk" in alg_set and "sparse_pytorch_topk_compact" in alg_set:
+                record["speedup_compact_vs_full_pytorch_topk"] = (
+                    record["ms_sparse_pytorch_topk"] / record["ms_sparse_pytorch_topk_compact"]
                 )
             if "cute_topk" in alg_set and "fused_topk" in alg_set:
                 record["speedup_cute_topk_vs_triton_topk"] = (
@@ -308,6 +344,22 @@ if __name__ == "__main__":
             title=f"Fused top-k speedup vs compile(sparse_linear_pytorch)+topk  (K={K}, k={args.topk})",
             filename="out/heatmap_fused_topk_vs_sparse_pytorch_topk.jpg",
             cbar_label="Speedup (>1 = fused faster)",
+        )
+    if "speedup_fused_topk_vs_sparse_pytorch_topk_compact" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_fused_topk_vs_sparse_pytorch_topk_compact",
+            title=f"Fused top-k speedup vs compile(sparse_linear_compact_pytorch)+topk  (K={K}, k={args.topk})",
+            filename="out/heatmap_fused_topk_vs_sparse_pytorch_topk_compact.jpg",
+            cbar_label="Speedup (>1 = fused faster)",
+        )
+    if "speedup_compact_vs_full_pytorch_topk" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_compact_vs_full_pytorch_topk",
+            title=f"Compact pytorch top-k speedup vs full (B,N) pytorch top-k  (K={K}, k={args.topk})",
+            filename="out/heatmap_compact_vs_full_pytorch_topk.jpg",
+            cbar_label="Speedup (>1 = compact faster)",
         )
     if "speedup_cute_topk_vs_triton_topk" in df.columns:
         plot_heatmap(
