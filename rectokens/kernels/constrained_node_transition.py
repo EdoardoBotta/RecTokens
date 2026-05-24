@@ -409,7 +409,7 @@ def _fused_linear_constrained_node_transition_op(
     bias_val = bias_val.contiguous()
 
     corrected_logits = torch.full(
-        (B, N), float("-inf"), dtype=torch.float32, device=a.device
+        (B, N), float("-inf"), dtype=torch.bfloat16, device=a.device
     )
     next_node = cur_node.new_full((B, max_branches), -1)
     valid_idxs = cur_node.new_full((B, max_branches), -1)
@@ -537,7 +537,7 @@ def _fused_sparse_linear_constrained_node_transition_kernel(
             corrected_logits_ptr
             + offs_B * corrected_logits_stride_B
             + col_k * corrected_logits_stride_N,
-            logit_k,
+            logit_k.to(tl.bfloat16),
             mask=c_mask,
         )
         _store_branch_outputs(
@@ -817,7 +817,7 @@ def _fused_linear_constrained_node_transition_topk_op(
     valid_idxs = cur_node.new_full((B, max_branches), -1)
     # Pass 1: compute per-branch logits into a [B, max_branches] scratch buffer.
     branch_logits = torch.full(
-        (B, max_branches), float("-inf"), dtype=torch.float32, device=a.device
+        (B, max_branches), float("-inf"), dtype=torch.bfloat16, device=a.device
     )
 
     grid = lambda meta: (
@@ -946,6 +946,6 @@ def _fused_sparse_linear_constrained_node_transition_topk_kernel(
     )
     tl.store(
         branch_logits_ptr + offs_B[:, None] * max_branches + offs_BR[None, :],
-        tl.where(branch_valid, logits, float("-inf")),
+        tl.where(branch_valid, logits, float("-inf")).to(tl.bfloat16),
         mask=store_mask,
     )

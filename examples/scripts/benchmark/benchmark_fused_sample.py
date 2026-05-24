@@ -119,8 +119,8 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                 cur_node = torch.zeros(B, dtype=torch.long, device=DEVICE)
                 step = 0
 
-            a = torch.randn(B, K, device=DEVICE)
-            weight = torch.randn(N, K, device=DEVICE)
+            a = torch.randn(B, K, device=DEVICE, dtype=torch.bfloat16)
+            weight = torch.randn(N, K, device=DEVICE, dtype=torch.bfloat16)
 
             cs = ConstraintState(step=step, trie=csr, cur_node=cur_node)
 
