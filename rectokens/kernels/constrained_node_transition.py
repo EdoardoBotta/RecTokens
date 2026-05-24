@@ -313,6 +313,66 @@ def _compute_branch_logits(
     return branch_cols, branch_vals, branch_valid, logits
 
 
+@triton.jit
+def _fused_prologue(
+    cur_node_ptr,
+    csr_trie_row_ptr,
+    a_ptr,
+    b_ptr,
+    bias_ptr,
+    csr_trie_cols_vals_ptr,
+    next_node_ptr,
+    valid_idxs_ptr,
+    a_stride_B,
+    a_stride_K,
+    b_stride_K,
+    b_stride_N,
+    cols_vals_stride_0,
+    next_node_stride_B,
+    next_node_stride_N,
+    valid_idxs_stride_B,
+    valid_idxs_stride_N,
+    max_branches,
+    B: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_B: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_BRANCHES: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+):
+    """Shared prologue: pid setup, CSR load, branch logit compute, and next_node/valid_idxs stores."""
+    pid_B = tl.program_id(axis=0)
+    pid_BR = tl.program_id(axis=1)
+
+    offs_B = pid_B * BLOCK_B + tl.arange(0, BLOCK_B)
+    offs_BR = pid_BR * BLOCK_BRANCHES + tl.arange(0, BLOCK_BRANCHES)
+    b_mask = offs_B < B
+
+    csr_row_ptrs, n_children = _load_csr_state(
+        offs_B, b_mask, cur_node_ptr, csr_trie_row_ptr
+    )
+
+    branch_cols, branch_vals, branch_valid, logits = _compute_branch_logits(
+        offs_B, offs_BR, b_mask, csr_row_ptrs, n_children,
+        a_ptr, b_ptr, bias_ptr, csr_trie_cols_vals_ptr,
+        a_stride_B, a_stride_K, b_stride_K, b_stride_N, cols_vals_stride_0,
+        max_branches, K, BLOCK_B, BLOCK_K, BLOCK_BRANCHES, HAS_BIAS,
+    )
+
+    store_mask = b_mask[:, None] & (offs_BR[None, :] < max_branches)
+    tl.store(
+        next_node_ptr + offs_B[:, None] * next_node_stride_B + offs_BR[None, :] * next_node_stride_N,
+        branch_vals,
+        mask=store_mask,
+    )
+    tl.store(
+        valid_idxs_ptr + offs_B[:, None] * valid_idxs_stride_B + offs_BR[None, :] * valid_idxs_stride_N,
+        branch_cols,
+        mask=store_mask,
+    )
+
+    return pid_BR, offs_B, offs_BR, b_mask, branch_cols, branch_valid, logits
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fused sparse linear kernel
@@ -420,51 +480,13 @@ def _fused_sparse_linear_constrained_node_transition_kernel(
     max_branches,
     HAS_BIAS: tl.constexpr,
 ):
-    pid_B = tl.program_id(axis=0)
-    pid_BR = tl.program_id(axis=1)
-
-    offs_B = pid_B * BLOCK_B + tl.arange(0, BLOCK_B)
-    offs_BR = pid_BR * BLOCK_BRANCHES + tl.arange(0, BLOCK_BRANCHES)
-    b_mask = offs_B < B
-
-    csr_row_ptrs, n_children = _load_csr_state(
-        offs_B, b_mask, cur_node_ptr, csr_trie_row_ptr
-    )
-
-    branch_cols, branch_vals, branch_valid, logits = _compute_branch_logits(
-        offs_B,
-        offs_BR,
-        b_mask,
-        csr_row_ptrs,
-        n_children,
-        a_ptr,
-        b_ptr,
-        bias_ptr,
-        csr_trie_cols_vals_ptr,
-        a_stride_B,
-        a_stride_K,
-        b_stride_K,
-        b_stride_N,
-        cols_vals_stride_0,
-        max_branches,
-        K,
-        BLOCK_B,
-        BLOCK_K,
-        BLOCK_BRANCHES,
-        HAS_BIAS,
-    )
-
-    # next_node and valid_idxs are indexed contiguously by branch slot — store as 2D blocks.
-    store_mask = b_mask[:, None] & (offs_BR[None, :] < max_branches)
-    tl.store(
-        next_node_ptr + offs_B[:, None] * next_node_stride_B + offs_BR[None, :] * next_node_stride_N,
-        branch_vals,
-        mask=store_mask,
-    )
-    tl.store(
-        valid_idxs_ptr + offs_B[:, None] * valid_idxs_stride_B + offs_BR[None, :] * valid_idxs_stride_N,
-        branch_cols,
-        mask=store_mask,
+    _, offs_B, _, _, branch_cols, branch_valid, logits = _fused_prologue(
+        cur_node_ptr, csr_trie_row_ptr,
+        a_ptr, b_ptr, bias_ptr, csr_trie_cols_vals_ptr,
+        next_node_ptr, valid_idxs_ptr,
+        a_stride_B, a_stride_K, b_stride_K, b_stride_N, cols_vals_stride_0,
+        next_node_stride_B, next_node_stride_N, valid_idxs_stride_B, valid_idxs_stride_N,
+        max_branches, B, K, BLOCK_B, BLOCK_K, BLOCK_BRANCHES, HAS_BIAS,
     )
 
     # corrected_logits is indexed by token column (scattered) — requires per-branch loop.
@@ -608,51 +630,13 @@ def _fused_sparse_linear_constrained_node_transition_sampling_kernel(
     max_branches,
     HAS_BIAS: tl.constexpr,
 ):
-    pid_B = tl.program_id(axis=0)
-    pid_BR = tl.program_id(axis=1)
-
-    offs_B = pid_B * BLOCK_B + tl.arange(0, BLOCK_B)
-    offs_BR = pid_BR * BLOCK_BRANCHES + tl.arange(0, BLOCK_BRANCHES)
-    b_mask = offs_B < B
-
-    csr_row_ptrs, n_children = _load_csr_state(
-        offs_B, b_mask, cur_node_ptr, csr_trie_row_ptr
-    )
-
-    branch_cols, branch_vals, branch_valid, logits = _compute_branch_logits(
-        offs_B,
-        offs_BR,
-        b_mask,
-        csr_row_ptrs,
-        n_children,
-        a_ptr,
-        b_ptr,
-        bias_ptr,
-        csr_trie_cols_vals_ptr,
-        a_stride_B,
-        a_stride_K,
-        b_stride_K,
-        b_stride_N,
-        cols_vals_stride_0,
-        max_branches,
-        K,
-        BLOCK_B,
-        BLOCK_K,
-        BLOCK_BRANCHES,
-        HAS_BIAS,
-    )
-
-    # next_node and valid_idxs are contiguous by branch slot — store as 2D blocks, no loop.
-    store_mask = b_mask[:, None] & (offs_BR[None, :] < max_branches)
-    tl.store(
-        next_node_ptr + offs_B[:, None] * next_node_stride_B + offs_BR[None, :] * next_node_stride_N,
-        branch_vals,
-        mask=store_mask,
-    )
-    tl.store(
-        valid_idxs_ptr + offs_B[:, None] * valid_idxs_stride_B + offs_BR[None, :] * valid_idxs_stride_N,
-        branch_cols,
-        mask=store_mask,
+    pid_BR, offs_B, offs_BR, b_mask, branch_cols, branch_valid, logits = _fused_prologue(
+        cur_node_ptr, csr_trie_row_ptr,
+        a_ptr, b_ptr, bias_ptr, csr_trie_cols_vals_ptr,
+        next_node_ptr, valid_idxs_ptr,
+        a_stride_B, a_stride_K, b_stride_K, b_stride_N, cols_vals_stride_0,
+        next_node_stride_B, next_node_stride_N, valid_idxs_stride_B, valid_idxs_stride_N,
+        max_branches, B, K, BLOCK_B, BLOCK_K, BLOCK_BRANCHES, HAS_BIAS,
     )
 
     # Vectorized Gumbel-max over the full [BLOCK_B, BLOCK_BRANCHES] block — registers only, no sync.
@@ -716,7 +700,7 @@ def _fused_linear_constrained_node_transition_topk_op(
         triton.cdiv(B, meta["BLOCK_B"]),
         triton.cdiv(max_branches, meta["BLOCK_BRANCHES"]),
     )
-    wrap_triton(_fused_sparse_linear_constrained_node_transition_topk_kernel)[grid](
+    wrap_triton(_fused_sparse_linear_constrained_node_transition_compact_kernel)[grid](
         a_ptr=a,
         b_ptr=b,
         bias_ptr=bias_val,
@@ -755,7 +739,7 @@ def _fused_linear_constrained_node_transition_topk_op(
     restore_value=["next_node_ptr", "valid_idxs_ptr", "branch_logits_ptr"],
 )
 @triton.jit
-def _fused_sparse_linear_constrained_node_transition_topk_kernel(
+def _fused_sparse_linear_constrained_node_transition_compact_kernel(
     # Inputs
     a_ptr,
     b_ptr,
@@ -785,57 +769,16 @@ def _fused_sparse_linear_constrained_node_transition_topk_kernel(
     max_branches,
     HAS_BIAS: tl.constexpr,
 ):
-    pid_B = tl.program_id(axis=0)
-    pid_BR = tl.program_id(axis=1)
-
-    offs_B = pid_B * BLOCK_B + tl.arange(0, BLOCK_B)
-    offs_BR = pid_BR * BLOCK_BRANCHES + tl.arange(0, BLOCK_BRANCHES)
-    b_mask = offs_B < B
-
-    csr_row_ptrs, n_children = _load_csr_state(
-        offs_B, b_mask, cur_node_ptr, csr_trie_row_ptr
+    _, offs_B, offs_BR, b_mask, _, branch_valid, logits = _fused_prologue(
+        cur_node_ptr, csr_trie_row_ptr,
+        a_ptr, b_ptr, bias_ptr, csr_trie_cols_vals_ptr,
+        next_node_ptr, valid_idxs_ptr,
+        a_stride_B, a_stride_K, b_stride_K, b_stride_N, cols_vals_stride_0,
+        next_node_stride_B, next_node_stride_N, valid_idxs_stride_B, valid_idxs_stride_N,
+        max_branches, B, K, BLOCK_B, BLOCK_K, BLOCK_BRANCHES, HAS_BIAS,
     )
 
-    branch_cols, branch_vals, branch_valid, logits = _compute_branch_logits(
-        offs_B,
-        offs_BR,
-        b_mask,
-        csr_row_ptrs,
-        n_children,
-        a_ptr,
-        b_ptr,
-        bias_ptr,
-        csr_trie_cols_vals_ptr,
-        a_stride_B,
-        a_stride_K,
-        b_stride_K,
-        b_stride_N,
-        cols_vals_stride_0,
-        max_branches,
-        K,
-        BLOCK_B,
-        BLOCK_K,
-        BLOCK_BRANCHES,
-        HAS_BIAS,
-    )
-
-    # Each (batch, branch_idx) address is unique across blocks — no lock needed.
-    # All three outputs are indexed by branch_idx (contiguous), so store as 2D blocks.
     store_mask = b_mask[:, None] & (offs_BR[None, :] < max_branches)
-    tl.store(
-        next_node_ptr
-        + offs_B[:, None] * next_node_stride_B
-        + offs_BR[None, :] * next_node_stride_N,
-        branch_vals,
-        mask=store_mask,
-    )
-    tl.store(
-        valid_idxs_ptr
-        + offs_B[:, None] * valid_idxs_stride_B
-        + offs_BR[None, :] * valid_idxs_stride_N,
-        branch_cols,
-        mask=store_mask,
-    )
     tl.store(
         branch_logits_ptr + offs_B[:, None] * max_branches + offs_BR[None, :],
         tl.where(branch_valid, logits, float("-inf")).to(tl.bfloat16),
