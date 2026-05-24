@@ -306,7 +306,7 @@ if __name__ == "__main__":
     os.makedirs("out", exist_ok=True)
 
     B_vals = [256, 1024, 4096]
-    N_vals = [150000]
+    N_vals = [256, 150000]
 
     print(
         f"Benchmarking K={K}, sparsity={args.sparsity}, topk={args.topk}, diverse_nodes={args.diverse_nodes}"
