@@ -143,40 +143,95 @@ def autoregressive_generate(
     trie: CompactCSRTrie,
     input_ids: torch.Tensor,
     generation_config: GenerationConfig,
-    attr_path: Optional[str] = None,
+    use_sparse_linear: bool = True,
     attention_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Run constrained autoregressive generation for `seq_len` steps.
 
-    When `attr_path` is given, a ConstraintEnforcer is created and applied to
-    the model before generation, replacing the output projection at that path
-    with a SparseLinear in-place.
+    When ``use_sparse_linear=True`` (the default) and ``model.get_output_embeddings()``
+    returns a plain ``nn.Linear``, the output projection is temporarily replaced with a
+    ``SparseLinear`` for the duration of generation and restored afterwards.
+    Pass ``use_sparse_linear=False`` to fall back to standard logit masking without the
+    fused kernel.
+
+    When ``generation_config.csr_kernel`` is ``"default"`` the appropriate fused kernel
+    is selected automatically: ``"topk"`` for beam search (``beam_size > 1``), ``"sample"``
+    for stochastic single-beam decoding (``temperature > 0``), and ``"default"`` otherwise.
+    An explicit kernel choice in the config is always respected.
 
     Returns:
         generated_ids: (B, k, seq_len) tensor of generated token ids.
     """
-    if attr_path is not None:
-        SparseTrieConstraintEnforcer(attr_path).prepare(model)
+    enforcer: Optional[SparseTrieConstraintEnforcer] = None
+    if use_sparse_linear and hasattr(model, "get_output_embeddings"):
+        output_emb = model.get_output_embeddings()
+        if isinstance(output_emb, nn.Linear) and not isinstance(
+            output_emb, SparseLinear
+        ):
+            enforcer = SparseTrieConstraintEnforcer()
 
-    state = ConstrainedGenerationState(
-        generation_config=generation_config,
-        generation_state=None,
-        constraint_state=ConstraintState(step=0, trie=trie, cur_node=None),
-    )
+    # Auto-select the fused CSR kernel when the caller left it at the default.
+    # Prefer "topk" for beam search (beam_size > 1); fall back to "sample" for
+    # stochastic single-beam decoding; keep "default" only for greedy single-beam.
+    if enforcer is not None and generation_config.csr_kernel == "default":
+        if generation_config.beam_size > 1:
+            kernel = "topk"
+        elif generation_config.temperature > 0:
+            kernel = "sample"
+        else:
+            kernel = "default"
+        generation_config = generation_config._replace(csr_kernel=kernel)
 
-    for _ in range(generation_config.steps):
-        state = decode_one_step(
-            constrained_generation_state=state,
-            model_fwd=model,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
+    ctx = enforcer.apply(model) if enforcer is not None else contextlib.nullcontext()
+    with ctx:
+        state = ConstrainedGenerationState(
+            generation_config=generation_config,
+            generation_state=None,
+            constraint_state=ConstraintState(step=0, trie=trie, cur_node=None),
         )
-        gen = state.generation_state.generated_ids  # (B, k, step+1)
-        input_ids = gen.reshape(-1, gen.shape[-1])[:, -1:]  # (B*k, 1)
-        attention_mask = None  # subsequent steps use accumulated mask from state
 
-    return state.generation_state.generated_ids
+        for _ in range(generation_config.steps):
+            state = decode_one_step(
+                constrained_generation_state=state,
+                model_fwd=model,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+            gen = state.generation_state.generated_ids  # (B, k, step+1)
+            input_ids = gen.reshape(-1, gen.shape[-1])[:, -1:]  # (B*k, 1)
+            attention_mask = None  # subsequent steps use accumulated mask from state
+
+        return state.generation_state.generated_ids
+
+
+def _draw_beam_candidates(
+    logits: torch.Tensor,
+    beam_size: int,
+    temperature: float,
+    constrained_linear: Optional[SparseLinear],
+    use_constrained: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample beam_size candidates per current beam.
+
+    Returns (samples_batched, sampled_log_probas), both shape (current_batch, beam_size).
+    """
+    if use_constrained and constrained_linear.sample is not None:
+        samples_batched = constrained_linear.sample.long().unsqueeze(1)  # (B, 1)
+        sampled_log_probas = torch.zeros(
+            logits.shape[0], 1, dtype=torch.float, device=logits.device
+        )
+    elif use_constrained and constrained_linear.topk_idxs is not None:
+        samples_batched = constrained_linear.topk_idxs  # (B, beam_size) actual token IDs
+        sampled_log_probas = F.log_softmax(logits, dim=-1)  # (B, beam_size)
+    elif temperature == 0.0:
+        _, samples_batched = logits.topk(beam_size, dim=-1)
+        sampled_log_probas = F.log_softmax(logits, dim=-1).gather(1, samples_batched)
+    else:
+        probas_batched = F.softmax(logits / temperature, dim=-1)
+        samples_batched = torch.multinomial(probas_batched, num_samples=beam_size)
+        sampled_log_probas = probas_batched.log().gather(1, samples_batched)
+    return samples_batched, sampled_log_probas
 
 
 def _reindex_past_key_values(
@@ -255,9 +310,7 @@ def decode_one_step(
         None if is_first_step else generation_state.generated_ids.reshape(B * k, -1)
     )
 
-    next_node = None
-    next_nodes = None
-    valid_idxs = None
+    next_node = next_nodes = valid_idxs = None
     if step < len(trie.dense_mask_by_layer):
         layer_mask = trie.dense_mask_by_layer[step]
         if is_first_step:
@@ -278,29 +331,9 @@ def decode_one_step(
             )
 
     # Sample beam_size candidates per current beam: (current_batch, beam_size)
-    if use_constrained and constrained_linear.sample is not None:
-        # Fused sampling kernel already drew one token per batch element.
-        samples_batched = constrained_linear.sample.long().unsqueeze(1)  # (B, 1)
-        sampled_log_probas = torch.zeros(
-            current_batch_size, 1, dtype=torch.float, device=logits.device
-        )
-    elif use_constrained and constrained_linear.topk_idxs is not None:
-        # Fused top-k kernel returned the beam_size best token IDs and their logits.
-        # logits here is (B, beam_size) from SparseLinear.forward.
-        samples_batched = (
-            constrained_linear.topk_idxs
-        )  # (B, beam_size) actual token IDs
-        sampled_log_probas = F.log_softmax(logits, dim=-1)  # (B, beam_size)
-    elif config.temperature == 0.0:
-        # Greedy top-k: take the beam_size highest-logit tokens directly.
-        _, samples_batched = logits.topk(beam_size, dim=-1)
-        sampled_log_probas = F.log_softmax(logits, dim=-1).gather(1, samples_batched)
-    else:
-        probas_batched = F.softmax(logits / config.temperature, dim=-1)
-        samples_batched = torch.multinomial(probas_batched, num_samples=beam_size)
-        sampled_log_probas = torch.log(
-            torch.gather(probas_batched, 1, samples_batched)
-        )  # (current_batch, beam_size)
+    samples_batched, sampled_log_probas = _draw_beam_candidates(
+        logits, beam_size, config.temperature, constrained_linear, use_constrained
+    )
 
     if is_first_step:
         # Pick top-k candidates per batch item from beam_size samples
@@ -312,10 +345,7 @@ def decode_one_step(
 
         # Each of the B originals produces k children: parent[b*k + i] = b
         flat_parent_ids = torch.arange(B, device=input_ids.device).repeat_interleave(k)
-
-        # Expand past_key_values to match the new B*k batch size
-        expand_ids = torch.arange(B, device=input_ids.device).repeat_interleave(k)
-        new_past_kv = _reindex_past_key_values(new_past_kv, expand_ids)
+        new_past_kv = _reindex_past_key_values(new_past_kv, flat_parent_ids)
     else:
         assert log_probas is not None
         # Accumulate log-probas across beams: (B, k*beam_size)

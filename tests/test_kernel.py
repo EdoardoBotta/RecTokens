@@ -12,6 +12,7 @@ from rectokens.decoding.vntk import vtnk_pytorch
 from rectokens.ops.constrained_node_transition import (
     constrained_node_transition,
     fused_linear_constrained_node_transition,
+    fused_linear_constrained_node_transition_sampling,
     fused_linear_constrained_node_transition_topk,
 )
 from rectokens.schemas.state import ConstraintState
@@ -232,6 +233,10 @@ class TestKernel(unittest.TestCase):
         ker_nn, ker_vi, ker_topk_l, ker_topk_i = (
             fused_linear_constrained_node_transition_topk(a, b, constraint_state, k)
         )
+        # When k > max_branches the kernel returns all branches; trim reference to match.
+        k_eff = ker_topk_l.shape[-1]
+        ref_topk_vals = ref_topk_vals[:, :k_eff]
+        ref_topk_idxs = ref_topk_idxs[:, :k_eff]
         # Sort both along k-dim to handle tie-breaking differences.
         assert torch.allclose(
             ker_topk_l.sort(dim=-1).values,
@@ -264,3 +269,62 @@ class TestKernel(unittest.TestCase):
 
     def test_fused_topk_k3_b8_large_k(self) -> None:
         self._assert_fused_topk(8, 128, 0, [0] * 8, k=2)
+
+
+# ---------------------------------------------------------------------------
+# Fused sampling kernel
+# ---------------------------------------------------------------------------
+
+
+class TestFusedSampling(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        seqs_small = [[1, 2, 1], [3, 1, 2], [3, 1, 3]]
+        csr = CompactCSRTrie.from_sorted_batch(
+            lex_sort(seqs_small), vocab_size=VOCAB_SIZE
+        )
+        cls.csr_small = csr._replace(
+            row_ptrs=csr.row_ptrs.to(DEVICE),
+            stacked_cols_vals=csr.stacked_cols_vals.to(DEVICE),
+            dense_mask_by_layer=[v.to(DEVICE) for v in csr.dense_mask_by_layer],
+            dense_states=csr.dense_states.to(DEVICE),
+        )
+
+    def _run_sampling(self, B, K, step, cur_node_vals, seed):
+        torch.manual_seed(0)
+        a = torch.randn(B, K, device=DEVICE)
+        b = torch.randn(K, VOCAB_SIZE, device=DEVICE)
+        cur_node = torch.tensor(cur_node_vals, device=DEVICE)
+        constraint_state = ConstraintState(
+            step=step, trie=self.csr_small, cur_node=cur_node
+        )
+        return fused_linear_constrained_node_transition_sampling(
+            a, b, constraint_state, rng_seed=seed
+        )
+
+    def test_same_seed_same_result_b1_step0(self) -> None:
+        nn1, vi1, s1 = self._run_sampling(1, 16, 0, [0], seed=42)
+        nn2, vi2, s2 = self._run_sampling(1, 16, 0, [0], seed=42)
+        assert torch.equal(nn1, nn2)
+        assert torch.equal(vi1, vi2)
+        assert torch.equal(s1, s2)
+
+    def test_same_seed_same_result_b4_step0(self) -> None:
+        nn1, vi1, s1 = self._run_sampling(4, 16, 0, [0, 0, 0, 0], seed=7)
+        nn2, vi2, s2 = self._run_sampling(4, 16, 0, [0, 0, 0, 0], seed=7)
+        assert torch.equal(nn1, nn2)
+        assert torch.equal(vi1, vi2)
+        assert torch.equal(s1, s2)
+
+    def test_sample_is_valid_child(self) -> None:
+        # Each sampled token must be one of the node's valid children.
+        for step, cur_node_vals in [(0, [0]), (1, [1, 2]), (2, [3, 4, 3])]:
+            nn, vi, sample = self._run_sampling(
+                len(cur_node_vals), 16, step, cur_node_vals, seed=123
+            )
+            for b in range(len(cur_node_vals)):
+                valid = vi[b][vi[b] >= 0].tolist()
+                assert int(sample[b].item()) in valid, (
+                    f"step={step} b={b}: sample {int(sample[b])} not in valid {valid}"
+                )
+

@@ -111,7 +111,6 @@ def main(
     encode_batch_size: int = 512,
     bf16: bool = False,
     seed: int = 42,
-    attr_path: str | None = None,
 ) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
@@ -226,7 +225,6 @@ def main(
                 trie=trie,
                 input_ids=input_ids,
                 generation_config=gen_config,
-                attr_path=attr_path,
             )
         # generated: (1, k, num_levels)
         generated_beams = generated[0]  # (k, num_levels)

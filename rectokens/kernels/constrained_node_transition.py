@@ -69,7 +69,7 @@ def _constrained_node_transition_op(
         triton.Config({"BLOCK_B": 128, "BLOCK_N": 64, "GROUP_SIZE_M": 4}),
         triton.Config({"BLOCK_B": 128, "BLOCK_N": 128, "GROUP_SIZE_M": 8}),
     ],
-    key=["B", "N"],
+    key=["B", "N", "max_branches"],
     restore_value=["corrected_logits_ptr", "next_node_ptr", "valid_idxs_ptr"],
 )
 @triton.jit
@@ -98,7 +98,7 @@ def _constrained_node_transition_kernel(
     BLOCK_B: tl.constexpr,
     BLOCK_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
-    max_branches,
+    max_branches: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(B, BLOCK_B)
@@ -184,6 +184,8 @@ _FUSED_AUTOTUNE_CONFIGS = [
     triton.Config({"BLOCK_B": 128, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}),
     triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
     triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
+    # triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 64}),
+    # triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 64}),
 ]
 
 
@@ -407,7 +409,7 @@ def _fused_linear_constrained_node_transition_op(
     bias_val = bias_val.contiguous()
 
     corrected_logits = torch.full(
-        (B, N), float("-inf"), dtype=torch.float32, device=a.device
+        (B, N), float("-inf"), dtype=torch.bfloat16, device=a.device
     )
     next_node = cur_node.new_full((B, max_branches), -1)
     valid_idxs = cur_node.new_full((B, max_branches), -1)
@@ -535,7 +537,7 @@ def _fused_sparse_linear_constrained_node_transition_kernel(
             corrected_logits_ptr
             + offs_B * corrected_logits_stride_B
             + col_k * corrected_logits_stride_N,
-            logit_k,
+            logit_k.to(tl.bfloat16),
             mask=c_mask,
         )
         _store_branch_outputs(
@@ -637,7 +639,7 @@ def _fused_linear_constrained_node_transition_sampling_op(
 
 @triton.autotune(
     configs=_FUSED_AUTOTUNE_CONFIGS,
-    key=["B", "K"],
+    key=["B", "K", "max_branches"],
     restore_value=[
         "next_node_ptr",
         "valid_idxs_ptr",
@@ -815,7 +817,7 @@ def _fused_linear_constrained_node_transition_topk_op(
     valid_idxs = cur_node.new_full((B, max_branches), -1)
     # Pass 1: compute per-branch logits into a [B, max_branches] scratch buffer.
     branch_logits = torch.full(
-        (B, max_branches), float("-inf"), dtype=torch.float32, device=a.device
+        (B, max_branches), float("-inf"), dtype=torch.bfloat16, device=a.device
     )
 
     grid = lambda meta: (
@@ -848,6 +850,8 @@ def _fused_linear_constrained_node_transition_topk_op(
     )
 
     # Pass 2: topk on the small [B, max_branches] buffer — no serialization.
+    if k >= max_branches:
+        return next_node, valid_idxs, branch_logits, valid_idxs.clone()
     topk_logits, topk_branch_idxs = torch.topk(branch_logits, k, dim=-1)
     topk_idxs = valid_idxs.gather(1, topk_branch_idxs)
     return next_node, valid_idxs, topk_logits, topk_idxs
@@ -855,7 +859,7 @@ def _fused_linear_constrained_node_transition_topk_op(
 
 @triton.autotune(
     configs=_FUSED_AUTOTUNE_CONFIGS,
-    key=["B", "K"],
+    key=["B", "K", "max_branches"],
     restore_value=["next_node_ptr", "valid_idxs_ptr", "branch_logits_ptr"],
 )
 @triton.jit
@@ -924,33 +928,24 @@ def _fused_sparse_linear_constrained_node_transition_topk_kernel(
     )
 
     # Each (batch, branch_idx) address is unique across blocks — no lock needed.
-    for local_br in tl.static_range(BLOCK_BRANCHES):
-        branch_idx = pid_BR * BLOCK_BRANCHES + local_br
-        in_range = branch_idx < max_branches
-        col_k, val_k, c_mask, logit_k = _extract_branch(
-            local_br,
-            branch_cols,
-            branch_vals,
-            branch_valid,
-            logits,
-            BLOCK_BRANCHES,
-        )
-        _store_branch_outputs(
-            offs_B,
-            b_mask,
-            in_range,
-            branch_idx,
-            col_k,
-            val_k,
-            next_node_ptr,
-            next_node_stride_B,
-            next_node_stride_N,
-            valid_idxs_ptr,
-            valid_idxs_stride_B,
-            valid_idxs_stride_N,
-        )
-        tl.store(
-            branch_logits_ptr + offs_B * max_branches + branch_idx,
-            tl.where(c_mask, logit_k, float("-inf")),
-            mask=b_mask & in_range,
-        )
+    # All three outputs are indexed by branch_idx (contiguous), so store as 2D blocks.
+    store_mask = b_mask[:, None] & (offs_BR[None, :] < max_branches)
+    tl.store(
+        next_node_ptr
+        + offs_B[:, None] * next_node_stride_B
+        + offs_BR[None, :] * next_node_stride_N,
+        branch_vals,
+        mask=store_mask,
+    )
+    tl.store(
+        valid_idxs_ptr
+        + offs_B[:, None] * valid_idxs_stride_B
+        + offs_BR[None, :] * valid_idxs_stride_N,
+        branch_cols,
+        mask=store_mask,
+    )
+    tl.store(
+        branch_logits_ptr + offs_B[:, None] * max_branches + offs_BR[None, :],
+        tl.where(branch_valid, logits, float("-inf")).to(tl.bfloat16),
+        mask=store_mask,
+    )

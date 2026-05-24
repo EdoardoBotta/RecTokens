@@ -85,6 +85,9 @@ class _MockHFModel(nn.Module):
     def get_output_embeddings(self) -> nn.Linear:
         return self._lm_head
 
+    def set_output_embeddings(self, new_embeddings: nn.Module) -> None:
+        self._lm_head = new_embeddings
+
     def resize_token_embeddings(self, new_size: int) -> nn.Embedding:
         old_emb = self._emb
         hidden = old_emb.embedding_dim
@@ -653,6 +656,256 @@ class TestFromCausalLM(unittest.TestCase):
         model = ItemAwareCausalLM.from_causal_lm(self._make_inner(), self.aware)
         assert model.get_input_embeddings() is model.model.get_input_embeddings()
         assert model.get_output_embeddings() is model.model.get_output_embeddings()
+
+
+# ---------------------------------------------------------------------------
+# Mock model with a CausalLM-compatible forward (for generation tests)
+# ---------------------------------------------------------------------------
+
+
+class _MockHFModelWithForward(nn.Module):
+    """_MockHFModel variant with a working forward method for generation tests.
+
+    Passes only the last token's hidden state to lm_head (2-D input) so it is
+    compatible with SparseLinear's fused-kernel assertion.
+    """
+
+    def __init__(self, vocab_size: int, hidden_size: int) -> None:
+        super().__init__()
+        self._emb = nn.Embedding(vocab_size, hidden_size)
+        self._lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
+
+    def get_output_embeddings(self) -> nn.Linear:
+        return self._lm_head
+
+    def set_output_embeddings(self, new_embeddings: nn.Module) -> None:
+        self._lm_head = new_embeddings
+
+    def forward(
+        self, input_ids, past_key_values=None, use_cache=False, attention_mask=None
+    ):
+        from transformers.modeling_outputs import CausalLMOutputWithPast
+
+        x = self._emb(input_ids)[:, -1, :]  # (B, hidden) — last token only, 2-D
+        logits_step = self._lm_head(x)  # (B, vocab)
+        return CausalLMOutputWithPast(
+            logits=logits_step.unsqueeze(1), past_key_values=None
+        )
+
+
+# ---------------------------------------------------------------------------
+# SparseTrieConstraintEnforcer unit tests (CPU)
+# ---------------------------------------------------------------------------
+
+
+from rectokens.modules.constraint_enforcer import SparseTrieConstraintEnforcer
+from rectokens.modules.sparse_linear import SparseLinear
+
+
+class TestSparseTrieConstraintEnforcer(unittest.TestCase):
+    """Verify prepare/restore lifecycle of SparseTrieConstraintEnforcer."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.aware, _ = _make_aware()
+
+    def _make_model(self) -> _MockHFModel:
+        return _MockHFModel(self.aware.vocab_size, HIDDEN_SIZE)
+
+    def test_prepare_installs_sparse_linear(self) -> None:
+        model = self._make_model()
+        enforcer = SparseTrieConstraintEnforcer()
+        enforcer.prepare(model)
+        assert isinstance(model.get_output_embeddings(), SparseLinear)
+
+    def test_sparse_linear_wraps_original(self) -> None:
+        model = self._make_model()
+        original = model.get_output_embeddings()
+        enforcer = SparseTrieConstraintEnforcer()
+        enforcer.prepare(model)
+        assert model.get_output_embeddings().base_linear is original
+
+    def test_restore_reinstates_original(self) -> None:
+        model = self._make_model()
+        original = model.get_output_embeddings()
+        enforcer = SparseTrieConstraintEnforcer()
+        enforcer.prepare(model)
+        enforcer.restore(model)
+        assert model.get_output_embeddings() is original
+
+    def test_restore_noop_when_not_prepared(self) -> None:
+        model = self._make_model()
+        original = model.get_output_embeddings()
+        enforcer = SparseTrieConstraintEnforcer()
+        enforcer.restore(model)  # must not raise
+        assert model.get_output_embeddings() is original
+
+    def test_double_prepare_raises(self) -> None:
+        model = self._make_model()
+        enforcer = SparseTrieConstraintEnforcer()
+        enforcer.prepare(model)
+        with self.assertRaises(RuntimeError):
+            enforcer.prepare(model)
+        enforcer.restore(model)
+
+
+# ---------------------------------------------------------------------------
+# autoregressive_generate integration tests (CUDA required)
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestAutoregressiveGenerate(unittest.TestCase):
+    """End-to-end tests for autoregressive_generate with SparseLinear lifecycle."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from rectokens.schemas.compact_csr_trie import CompactCSRTrie
+        from rectokens.decoding.constrained_decoding import autoregressive_generate
+        from rectokens.schemas.config import GenerationConfig
+
+        cls._autoregressive_generate = staticmethod(autoregressive_generate)
+        cls._GenerationConfig = GenerationConfig
+        cls._device = torch.device("cuda")
+        cls._vocab_size = 8
+        cls._hidden_size = 16
+        cls._num_levels = 3
+        cls._k = 2
+        cls._beam_size = 4
+
+        seqs = torch.tensor(
+            [[1, 2, 3], [1, 2, 4], [2, 5, 1], [3, 1, 2]],
+            dtype=torch.long,
+            device=cls._device,
+        )
+        cls._trie = CompactCSRTrie.from_sorted_batch(
+            seqs, vocab_size=cls._vocab_size, dense_lookup_layers=1
+        )
+
+        # Warm up Triton kernels to avoid async JIT-compilation errors in the
+        # first test method (CUDA error from compilation bleeds into the next call).
+        _warmup = _MockHFModelWithForward(cls._vocab_size, cls._hidden_size).to(
+            cls._device
+        )
+        autoregressive_generate(
+            _warmup,
+            cls._trie,
+            torch.zeros(1, 2, dtype=torch.long, device=cls._device),
+            GenerationConfig(steps=cls._num_levels, k=1, beam_size=2, temperature=0.0),
+        )
+        torch.cuda.synchronize()
+
+    def _make_model(self) -> _MockHFModelWithForward:
+        return _MockHFModelWithForward(self._vocab_size, self._hidden_size).to(
+            self._device
+        )
+
+    def _input_ids(self, B: int = 1) -> torch.Tensor:
+        return torch.zeros(B, 2, dtype=torch.long, device=self._device)
+
+    def _gen_config(self):
+        return self._GenerationConfig(
+            steps=self._num_levels,
+            k=self._k,
+            beam_size=self._beam_size,
+            temperature=0.0,  # greedy topk avoids multinomial without-replacement issues
+        )
+
+    def test_output_shape(self) -> None:
+        model = self._make_model()
+        out = self._autoregressive_generate(
+            model, self._trie, self._input_ids(), self._gen_config()
+        )
+        assert out.shape == (1, self._k, self._num_levels)
+
+    def test_sparse_linear_removed_after_generate(self) -> None:
+        model = self._make_model()
+        original = model.get_output_embeddings()
+        self._autoregressive_generate(
+            model, self._trie, self._input_ids(), self._gen_config()
+        )
+        assert model.get_output_embeddings() is original
+        assert not isinstance(model.get_output_embeddings(), SparseLinear)
+
+    def test_double_call_regression(self) -> None:
+        """Regression: second call must not raise TypeError on lm_head."""
+        model = self._make_model()
+        original = model.get_output_embeddings()
+        for _ in range(2):
+            self._autoregressive_generate(
+                model, self._trie, self._input_ids(), self._gen_config()
+            )
+            assert model.get_output_embeddings() is original
+            assert not isinstance(model.get_output_embeddings(), SparseLinear)
+
+    def test_use_sparse_linear_false(self) -> None:
+        model = self._make_model()
+        original = model.get_output_embeddings()
+        out = self._autoregressive_generate(
+            model,
+            self._trie,
+            self._input_ids(),
+            self._gen_config(),
+            use_sparse_linear=False,
+        )
+        assert out.shape == (1, self._k, self._num_levels)
+        assert model.get_output_embeddings() is original
+
+    def test_restore_on_exception(self) -> None:
+        """SparseLinear must be removed even when the forward pass raises."""
+        from transformers.modeling_outputs import CausalLMOutputWithPast
+
+        class _FailingModel(nn.Module):
+            def __init__(self, vocab_size, hidden_size):
+                super().__init__()
+                self._lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
+
+            def get_output_embeddings(self):
+                return self._lm_head
+
+            def set_output_embeddings(self, v):
+                self._lm_head = v
+
+            def forward(self, *args, **kwargs):
+                raise RuntimeError("intentional failure")
+
+        model = _FailingModel(self._vocab_size, self._hidden_size).to(self._device)
+        original = model.get_output_embeddings()
+        with self.assertRaises(RuntimeError):
+            self._autoregressive_generate(
+                model, self._trie, self._input_ids(), self._gen_config()
+            )
+        assert model.get_output_embeddings() is original
+        assert not isinstance(model.get_output_embeddings(), SparseLinear)
+
+    def test_model_without_get_output_embeddings(self) -> None:
+        """Models without get_output_embeddings silently skip SparseLinear."""
+        from transformers.modeling_outputs import CausalLMOutputWithPast
+
+        class _SimpleModel(nn.Module):
+            def __init__(self, vocab_size, hidden_size):
+                super().__init__()
+                self.emb = nn.Embedding(vocab_size, hidden_size)
+                self.linear = nn.Linear(hidden_size, vocab_size, bias=False)
+
+            def forward(
+                self,
+                input_ids,
+                past_key_values=None,
+                use_cache=False,
+                attention_mask=None,
+            ):
+                x = self.emb(input_ids)[:, -1, :]
+                logits = self.linear(x)
+                return CausalLMOutputWithPast(
+                    logits=logits.unsqueeze(1), past_key_values=None
+                )
+
+        model = _SimpleModel(self._vocab_size, self._hidden_size).to(self._device)
+        out = self._autoregressive_generate(
+            model, self._trie, self._input_ids(), self._gen_config()
+        )
+        assert out.shape == (1, self._k, self._num_levels)
 
 
 if __name__ == "__main__":
