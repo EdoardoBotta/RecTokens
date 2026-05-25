@@ -30,7 +30,7 @@ class CompactELLTrie(NamedTuple):
     """
 
     ell_cols_vals: Tensor       # (num_nodes, 2, max_branches): [cols, vals], -1 = padding
-    n_children: Tensor          # (num_nodes,): actual number of children per node
+    n_children: Tensor          # (num_nodes,): child count per node — used as a block-level gate
     layer_max_branches: list[int]
     dense_mask_by_layer: list[Tensor]
     dense_states: Tensor

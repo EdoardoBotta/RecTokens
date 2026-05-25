@@ -4,6 +4,7 @@ from __future__ import annotations
 import unittest
 
 import torch
+import torch.nn.functional as F
 
 if not torch.cuda.is_available():
     raise unittest.SkipTest("CUDA required")
@@ -17,6 +18,12 @@ from rectokens.kernels.constrained_node_transition import (
 from rectokens.kernels.constrained_node_transition_ell import (
     _ell_fused_linear_constrained_node_transition_sampling_op as ell_sampling_op,
     _ell_fused_linear_constrained_node_transition_topk_op as ell_topk_op,
+)
+from rectokens.decoding.vntk import (
+    sparse_linear_pytorch,
+    sparse_linear_compact_pytorch,
+    sparse_linear_ell_pytorch,
+    sparse_linear_compact_ell_pytorch,
 )
 
 
@@ -348,3 +355,155 @@ class TestELLvCSRTopK(unittest.TestCase):
             torch.allclose(ell_tl.float(), csr_tl.float(), atol=1e-3, equal_nan=True)
         )
         self.assertTrue(torch.equal(ell_ti, csr_ti))
+
+
+class TestELLPytorchvCSRPytorch(unittest.TestCase):
+    """ELL sparse_linear_pytorch outputs match CSR sparse_linear_pytorch outputs."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        seqs_small = [[1, 2, 1], [3, 1, 2], [3, 1, 3]]
+        cls.csr_small, cls.ell_small = make_tries(seqs_small, VOCAB_SIZE)
+
+        seqs_dense = [[i, j, k] for i in range(4) for j in range(4) for k in range(4)]
+        cls.csr_dense, cls.ell_dense = make_tries(seqs_dense, vocab_size=16)
+
+    # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
+
+    def _run_both(self, B, K, step, cur_node_vals, csr, ell):
+        torch.manual_seed(0)
+        a = torch.randn(B, K, device=DEVICE)
+        weight = torch.randn(csr.vocab_size, K, device=DEVICE)
+        cur_node = torch.tensor(cur_node_vals, device=DEVICE)
+
+        csr_out = sparse_linear_pytorch(a, weight, cur_node, csr, step)
+        ell_out = sparse_linear_ell_pytorch(a, weight, cur_node, ell, step)
+        return csr_out, ell_out
+
+    def _run_both_compact(self, B, K, step, cur_node_vals, csr, ell):
+        torch.manual_seed(0)
+        a = torch.randn(B, K, device=DEVICE)
+        weight = torch.randn(csr.vocab_size, K, device=DEVICE)
+        cur_node = torch.tensor(cur_node_vals, device=DEVICE)
+
+        csr_out = sparse_linear_compact_pytorch(a, weight, cur_node, csr, step)
+        ell_out = sparse_linear_compact_ell_pytorch(a, weight, cur_node, ell, step)
+        return csr_out, ell_out
+
+    def _assert_full_match(self, B, K, step, cur_node_vals, csr=None, ell=None):
+        if csr is None:
+            csr, ell = self.csr_small, self.ell_small
+        (csr_nn, csr_vi, csr_cl), (ell_nn, ell_vi, ell_cl) = self._run_both(
+            B, K, step, cur_node_vals, csr, ell
+        )
+        self.assertTrue(torch.equal(ell_nn, csr_nn), "next_node mismatch")
+        self.assertTrue(torch.equal(ell_vi, csr_vi), "valid_idxs mismatch")
+        self.assertTrue(
+            torch.allclose(ell_cl.float(), csr_cl.float(), equal_nan=True),
+            "corrected_logits mismatch",
+        )
+
+    def _assert_compact_match(self, B, K, step, cur_node_vals, csr=None, ell=None):
+        if csr is None:
+            csr, ell = self.csr_small, self.ell_small
+        (csr_nn, csr_vi, csr_bl), (ell_nn, ell_vi, ell_bl) = self._run_both_compact(
+            B, K, step, cur_node_vals, csr, ell
+        )
+        self.assertTrue(torch.equal(ell_nn, csr_nn), "next_node mismatch")
+        self.assertTrue(torch.equal(ell_vi, csr_vi), "valid_idxs mismatch")
+        self.assertTrue(
+            torch.allclose(ell_bl.float(), csr_bl.float(), equal_nan=True),
+            "branch_logits mismatch",
+        )
+
+    # -------------------------------------------------------------------------
+    # sparse_linear_ell_pytorch matches sparse_linear_pytorch (full scatter)
+    # -------------------------------------------------------------------------
+
+    def test_full_b1_step0(self) -> None:
+        self._assert_full_match(1, 16, 0, [0])
+
+    def test_full_b2_step0_same_node(self) -> None:
+        self._assert_full_match(2, 16, 0, [0, 0])
+
+    def test_full_b2_step1_diff_nodes(self) -> None:
+        self._assert_full_match(2, 16, 1, [1, 2])
+
+    def test_full_b3_step2(self) -> None:
+        self._assert_full_match(3, 16, 2, [3, 4, 3])
+
+    def test_full_b8_large_k(self) -> None:
+        self._assert_full_match(8, 128, 0, [0] * 8)
+
+    def test_full_dense_trie_step0(self) -> None:
+        self._assert_full_match(
+            8, 16, 0, [0] * 8, csr=self.csr_dense, ell=self.ell_dense
+        )
+
+    def test_full_dense_trie_step1(self) -> None:
+        self._assert_full_match(
+            4, 16, 1, [1, 2, 3, 4], csr=self.csr_dense, ell=self.ell_dense
+        )
+
+    # -------------------------------------------------------------------------
+    # sparse_linear_compact_ell_pytorch matches sparse_linear_compact_pytorch
+    # -------------------------------------------------------------------------
+
+    def test_compact_b1_step0(self) -> None:
+        self._assert_compact_match(1, 16, 0, [0])
+
+    def test_compact_b2_step1_diff_nodes(self) -> None:
+        self._assert_compact_match(2, 16, 1, [1, 2])
+
+    def test_compact_b3_step2(self) -> None:
+        self._assert_compact_match(3, 16, 2, [3, 4, 3])
+
+    def test_compact_b8_large_k(self) -> None:
+        self._assert_compact_match(8, 128, 0, [0] * 8)
+
+    def test_compact_dense_trie_step1(self) -> None:
+        self._assert_compact_match(
+            4, 16, 1, [1, 2, 3, 4], csr=self.csr_dense, ell=self.ell_dense
+        )
+
+    # -------------------------------------------------------------------------
+    # sample built on ELL full output matches sample built on CSR full output
+    # -------------------------------------------------------------------------
+
+    def test_sample_valid_child_step0(self) -> None:
+        torch.manual_seed(7)
+        a = torch.randn(2, 16, device=DEVICE)
+        weight = torch.randn(VOCAB_SIZE, 16, device=DEVICE)
+        cur_node = torch.tensor([0, 0], device=DEVICE)
+        _, vi, corrected_logits = sparse_linear_ell_pytorch(
+            a, weight, cur_node, self.ell_small, step=0
+        )
+        probs = F.softmax(corrected_logits, dim=-1)
+        sample = torch.multinomial(probs, num_samples=1).squeeze(-1)
+        for b in range(2):
+            valid = vi[b][vi[b] >= 0].tolist()
+            self.assertIn(int(sample[b].item()), valid)
+
+    # -------------------------------------------------------------------------
+    # top-k built on ELL compact output matches top-k built on CSR compact output
+    # -------------------------------------------------------------------------
+
+    def test_topk_compact_b2_k1_step1(self) -> None:
+        torch.manual_seed(42)
+        B, K, step, k = 2, 16, 1, 1
+        a = torch.randn(B, K, device=DEVICE)
+        weight = torch.randn(VOCAB_SIZE, K, device=DEVICE)
+        cur_node = torch.tensor([1, 2], device=DEVICE)
+
+        _, csr_vi, csr_bl = sparse_linear_compact_pytorch(a, weight, cur_node, self.csr_small, step)
+        csr_topk_l, csr_topk_bi = torch.topk(csr_bl, k, dim=-1)
+        csr_topk_i = csr_vi.gather(1, csr_topk_bi)
+
+        _, ell_vi, ell_bl = sparse_linear_compact_ell_pytorch(a, weight, cur_node, self.ell_small, step)
+        ell_topk_l, ell_topk_bi = torch.topk(ell_bl, k, dim=-1)
+        ell_topk_i = ell_vi.gather(1, ell_topk_bi)
+
+        self.assertTrue(torch.allclose(ell_topk_l, csr_topk_l, equal_nan=True))
+        self.assertTrue(torch.equal(ell_topk_i, csr_topk_i))

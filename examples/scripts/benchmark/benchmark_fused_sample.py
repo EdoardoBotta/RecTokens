@@ -23,7 +23,12 @@ import pandas as pd
 from rectokens.schemas.compact_csr_trie import CompactCSRTrie
 from rectokens.schemas.compact_ell_trie import CompactELLTrie
 from rectokens.schemas.state import ConstraintState
-from rectokens.decoding.vntk import sparse_linear_pytorch, sparse_linear_compact_pytorch
+from rectokens.decoding.vntk import (
+    sparse_linear_pytorch,
+    sparse_linear_compact_pytorch,
+    sparse_linear_ell_pytorch,
+    sparse_linear_compact_ell_pytorch,
+)
 from rectokens.ops.constrained_node_transition import (
     fused_linear_constrained_node_transition_sampling,
     fused_linear_constrained_node_transition_topk,
@@ -43,15 +48,18 @@ ALL_ALGORITHMS = [
     "fused_sample",
     "ell_sample",
     "sparse_pytorch_sample",
+    "sparse_pytorch_ell_sample",
     "fused_topk",
     "ell_topk",
     "sparse_pytorch_topk",
     "sparse_pytorch_topk_compact",
+    "sparse_pytorch_ell_topk_compact",
 ]
 DEFAULT_ALGORITHMS = [
-    "fused_sample",
-    "ell_sample",
-    "sparse_pytorch_sample",
+    "fused_topk",
+    "ell_topk",
+    "sparse_pytorch_topk_compact",
+    "sparse_pytorch_ell_topk_compact",
 ]
 DEFAULT_SPARSITY = 0.01
 
@@ -139,6 +147,8 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
 
             needs_sparse_full = alg_set & {"sparse_pytorch_sample", "sparse_pytorch_topk"}
             needs_sparse_compact = "sparse_pytorch_topk_compact" in alg_set
+            needs_sparse_ell_full = "sparse_pytorch_ell_sample" in alg_set
+            needs_sparse_ell_compact = "sparse_pytorch_ell_topk_compact" in alg_set
             if needs_sparse_full:
                 sparse_linear_pytorch_compiled = torch.compile(sparse_linear_pytorch)
             if needs_sparse_compact:
@@ -153,11 +163,37 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
 
                 sparse_compact_topk_compiled = torch.compile(_sparse_compact_topk)
 
+            if needs_sparse_ell_full or needs_sparse_ell_compact:
+                if not needs_ell:
+                    ell = make_ell(csr)
+            if needs_sparse_ell_full:
+                sparse_linear_ell_pytorch_compiled = torch.compile(sparse_linear_ell_pytorch)
+            if needs_sparse_ell_compact:
+
+                def _sparse_ell_compact_topk(a, weight, cur_node, ell_trie, step, k):
+                    nn, vi, branch_logits = sparse_linear_compact_ell_pytorch(
+                        a, weight, cur_node, ell_trie, step
+                    )
+                    topk_logits, topk_branch_idxs = torch.topk(branch_logits, k, dim=-1)
+                    topk_idxs = vi.gather(1, topk_branch_idxs)
+                    return nn, vi, topk_logits, topk_idxs
+
+                sparse_ell_compact_topk_compiled = torch.compile(_sparse_ell_compact_topk)
+
             if "sparse_pytorch_sample" in alg_set:
 
                 def sparse_pytorch_with_sample():
                     _, _, corrected_logits = sparse_linear_pytorch_compiled(
                         a, weight, cur_node, csr, step=step
+                    )
+                    probs = F.softmax(corrected_logits, dim=-1)
+                    return torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+            if "sparse_pytorch_ell_sample" in alg_set:
+
+                def sparse_pytorch_ell_with_sample():
+                    _, _, corrected_logits = sparse_linear_ell_pytorch_compiled(
+                        a, weight, cur_node, ell, step=step
                     )
                     probs = F.softmax(corrected_logits, dim=-1)
                     return torch.multinomial(probs, num_samples=1).squeeze(-1)
@@ -177,6 +213,13 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                         a, weight, cur_node, csr, step, k
                     )
 
+            if needs_sparse_ell_compact:
+
+                def sparse_pytorch_ell_compact_with_topk():
+                    return sparse_ell_compact_topk_compiled(
+                        a, weight, cur_node, ell, step, k
+                    )
+
             # --- warmup / force compilation ---
             with torch.no_grad():
                 if "fused_sample" in alg_set:
@@ -185,6 +228,8 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                     ell_sampling_op(a, weight.T, _bias, cur_node, ell.ell_cols_vals, ell.n_children, max_branches, False)
                 if "sparse_pytorch_sample" in alg_set:
                     sparse_pytorch_with_sample()
+                if "sparse_pytorch_ell_sample" in alg_set:
+                    sparse_pytorch_ell_with_sample()
                 if "fused_topk" in alg_set:
                     fused_linear_constrained_node_transition_topk(a, weight.T, cs, k=k)
                 if "ell_topk" in alg_set:
@@ -193,6 +238,8 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                     sparse_pytorch_with_topk()
                 if "sparse_pytorch_topk_compact" in alg_set:
                     sparse_pytorch_compact_with_topk()
+                if "sparse_pytorch_ell_topk_compact" in alg_set:
+                    sparse_pytorch_ell_compact_with_topk()
             record = {"B": B, "N": N}
 
             # --- benchmark ---
@@ -214,6 +261,10 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                     record["ms_sparse_pytorch_sample"] = run_bench(
                         sparse_pytorch_with_sample
                     )
+                if "sparse_pytorch_ell_sample" in alg_set:
+                    record["ms_sparse_pytorch_ell_sample"] = run_bench(
+                        sparse_pytorch_ell_with_sample
+                    )
                 if "fused_topk" in alg_set:
                     record["ms_fused_topk"] = run_bench(
                         lambda: fused_linear_constrained_node_transition_topk(
@@ -234,6 +285,10 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                 if "sparse_pytorch_topk_compact" in alg_set:
                     record["ms_sparse_pytorch_topk_compact"] = run_bench(
                         sparse_pytorch_compact_with_topk
+                    )
+                if "sparse_pytorch_ell_topk_compact" in alg_set:
+                    record["ms_sparse_pytorch_ell_topk_compact"] = run_bench(
+                        sparse_pytorch_ell_compact_with_topk
                     )
             if "fused_sample" in alg_set and "sparse_pytorch_sample" in alg_set:
                 record["speedup_fused_vs_sparse_pytorch_sample"] = (
@@ -266,6 +321,22 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
             if "sparse_pytorch_topk" in alg_set and "sparse_pytorch_topk_compact" in alg_set:
                 record["speedup_compact_vs_full_pytorch_topk"] = (
                     record["ms_sparse_pytorch_topk"] / record["ms_sparse_pytorch_topk_compact"]
+                )
+            if "sparse_pytorch_ell_sample" in alg_set and "sparse_pytorch_sample" in alg_set:
+                record["speedup_ell_pytorch_vs_csr_pytorch_sample"] = (
+                    record["ms_sparse_pytorch_sample"] / record["ms_sparse_pytorch_ell_sample"]
+                )
+            if "sparse_pytorch_ell_sample" in alg_set and "ell_sample" in alg_set:
+                record["speedup_ell_triton_vs_ell_pytorch_sample"] = (
+                    record["ms_sparse_pytorch_ell_sample"] / record["ms_ell_sample"]
+                )
+            if "sparse_pytorch_ell_topk_compact" in alg_set and "sparse_pytorch_topk_compact" in alg_set:
+                record["speedup_ell_pytorch_vs_csr_pytorch_topk_compact"] = (
+                    record["ms_sparse_pytorch_topk_compact"] / record["ms_sparse_pytorch_ell_topk_compact"]
+                )
+            if "sparse_pytorch_ell_topk_compact" in alg_set and "ell_topk" in alg_set:
+                record["speedup_ell_triton_vs_ell_pytorch_topk_compact"] = (
+                    record["ms_sparse_pytorch_ell_topk_compact"] / record["ms_ell_topk"]
                 )
             records.append(record)
 

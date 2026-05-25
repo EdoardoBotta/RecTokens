@@ -38,20 +38,13 @@ _ELL_AUTOTUNE_CONFIGS = [
 
 
 @triton.jit
-def _load_ell_state(offs_B, b_mask, cur_node_ptr, ell_n_children_ptr):
-    """Load (cur_node, n_children) for the current batch from the ELL trie."""
-    cur_node = tl.load(cur_node_ptr + offs_B, mask=b_mask, other=-1)
-    n_children = tl.load(ell_n_children_ptr + cur_node, mask=cur_node >= 0, other=0)
-    return cur_node, n_children
-
-
-@triton.jit
 def _compute_ell_branch_logits(
     offs_B,
     offs_BR,
     b_mask,
     cur_node,
-    n_children,
+    branch_cols,   # [BLOCK_B, BLOCK_BRANCHES] — pre-loaded by caller
+    branch_valid,  # [BLOCK_B, BLOCK_BRANCHES] — pre-computed by caller
     a_ptr,
     b_ptr,
     bias_ptr,
@@ -62,36 +55,22 @@ def _compute_ell_branch_logits(
     b_stride_N,
     ell_node_stride,  # ell_cols_vals.stride(0) = 2 * max_branches
     ell_cv_stride,    # ell_cols_vals.stride(1) = max_branches (cols→vals gap within a node)
-    max_branches,
     K: tl.constexpr,
     BLOCK_B: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_BRANCHES: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    """Load branch data and compute per-branch dot-product logits from ELL format.
+    """Compute per-branch dot-product logits from ELL format.
 
-    Layout: ell_cols_vals[node, 0, branch] = col, ell_cols_vals[node, 1, branch] = val.
-    ell_node_stride = 2*max_branches; ell_cv_stride = max_branches so cols and vals
-    for the same node are adjacent in memory (max_branches apart, not num_nodes*max_branches).
+    branch_cols and branch_valid are pre-loaded by the caller so validity can be
+    checked before this function is called, enabling an early exit for empty tiles.
 
     ell_node_base [BLOCK_B] avoids the former ell_row_offsets [BLOCK_B, BLOCK_BRANCHES]
-    intermediate, reducing register footprint by BLOCK_BRANCHES×. The 2D address is
-    computed inline inside each tl.load.
+    intermediate, reducing register footprint by BLOCK_BRANCHES×.
     """
-    branch_valid = (
-        b_mask[:, None]
-        & (n_children[:, None] > offs_BR[None, :].to(tl.int64))
-        & (offs_BR[None, :] < max_branches)
-    )  # [BLOCK_B, BLOCK_BRANCHES]
-
     ell_node_base = cur_node.to(tl.int64) * ell_node_stride  # [BLOCK_B]
 
-    branch_cols = tl.load(
-        ell_cols_vals_ptr + ell_node_base[:, None] + offs_BR[None, :].to(tl.int64),
-        mask=branch_valid,
-        other=-1,
-    )  # [BLOCK_B, BLOCK_BRANCHES]
     branch_vals = tl.load(
         ell_cols_vals_ptr + ell_cv_stride + ell_node_base[:, None] + offs_BR[None, :].to(tl.int64),
         mask=branch_valid,
@@ -130,7 +109,7 @@ def _compute_ell_branch_logits(
             bias_k = tl.load(bias_ptr + col_k, mask=c_mask, other=0.0)
             logits = tl.where(br_sel[None, :], logits + bias_k[:, None], logits)
 
-    return branch_cols, branch_vals, branch_valid, logits
+    return branch_vals, logits
 
 
 @triton.jit
@@ -161,7 +140,16 @@ def _ell_fused_prologue(
     BLOCK_BRANCHES: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    """Shared ELL prologue: pid setup, ELL state load, branch logit compute, next_node/valid_idxs stores."""
+    """Shared ELL prologue: pid setup, branch-cols load, validity check, logit compute, stores.
+
+    Uses n_children as a block-level gate: if no batch item has a child in
+    [pid_BR*BLOCK_BRANCHES, ...), the ell_cols_vals load is skipped entirely, avoiding
+    HBM traffic for padding blocks when max_branches is large. Within valid blocks,
+    per-lane validity is derived from the -1 sentinel in branch_cols.
+
+    Returns any_valid so the calling kernel can skip its own work (gumbel sampling /
+    logit stores) when the block has no valid branches.
+    """
     pid_B = tl.program_id(axis=0)
     pid_BR = tl.program_id(axis=1)
 
@@ -169,35 +157,57 @@ def _ell_fused_prologue(
     offs_BR = pid_BR * BLOCK_BRANCHES + tl.arange(0, BLOCK_BRANCHES)
     b_mask = offs_B < B
 
-    cur_node, n_children = _load_ell_state(
-        offs_B, b_mask, cur_node_ptr, ell_n_children_ptr
-    )
+    cur_node = tl.load(cur_node_ptr + offs_B, mask=b_mask, other=-1)
+    n_children = tl.load(ell_n_children_ptr + cur_node, mask=cur_node >= 0, other=0)
 
-    branch_cols, branch_vals, branch_valid, logits = _compute_ell_branch_logits(
-        offs_B, offs_BR, b_mask, cur_node, n_children,
-        a_ptr, b_ptr, bias_ptr, ell_cols_vals_ptr,
-        a_stride_B, a_stride_K, b_stride_K, b_stride_N,
-        ell_node_stride, ell_cv_stride,
-        max_branches, K, BLOCK_B, BLOCK_K, BLOCK_BRANCHES, HAS_BIAS,
-    )
+    # Block-level gate: skip ELL load if no batch item has a child in this branch slice.
+    # n_children is a compact (num_nodes,) int tensor that fits in L2; checking it here
+    # avoids reading the much larger ell_cols_vals for blocks that are entirely padding.
+    block_br_start = pid_BR * BLOCK_BRANCHES
+    n_in_range = tl.sum((n_children > block_br_start).to(tl.int32))
+    if n_in_range > 0:
+        ell_node_base = cur_node.to(tl.int64) * ell_node_stride
+        load_mask = b_mask[:, None] & (offs_BR[None, :] < max_branches)
+        branch_cols = tl.load(
+            ell_cols_vals_ptr + ell_node_base[:, None] + offs_BR[None, :].to(tl.int64),
+            mask=load_mask,
+            other=-1,
+        )  # [BLOCK_B, BLOCK_BRANCHES]
+        branch_valid = b_mask[:, None] & (branch_cols >= 0)  # -1 sentinel marks padding
 
-    store_mask = b_mask[:, None] & (offs_BR[None, :] < max_branches)
-    tl.store(
-        next_node_ptr
-        + offs_B[:, None] * next_node_stride_B
-        + offs_BR[None, :] * next_node_stride_N,
-        branch_vals,
-        mask=store_mask,
-    )
-    tl.store(
-        valid_idxs_ptr
-        + offs_B[:, None] * valid_idxs_stride_B
-        + offs_BR[None, :] * valid_idxs_stride_N,
-        branch_cols,
-        mask=store_mask,
-    )
+        any_valid = tl.sum(branch_valid.to(tl.int32)) > 0
+        if any_valid:
+            branch_vals, logits = _compute_ell_branch_logits(
+                offs_B, offs_BR, b_mask, cur_node, branch_cols, branch_valid,
+                a_ptr, b_ptr, bias_ptr, ell_cols_vals_ptr,
+                a_stride_B, a_stride_K, b_stride_K, b_stride_N,
+                ell_node_stride, ell_cv_stride,
+                K, BLOCK_B, BLOCK_K, BLOCK_BRANCHES, HAS_BIAS,
+            )
+            store_mask = b_mask[:, None] & (offs_BR[None, :] < max_branches)
+            tl.store(
+                next_node_ptr
+                + offs_B[:, None] * next_node_stride_B
+                + offs_BR[None, :] * next_node_stride_N,
+                branch_vals,
+                mask=store_mask,
+            )
+            tl.store(
+                valid_idxs_ptr
+                + offs_B[:, None] * valid_idxs_stride_B
+                + offs_BR[None, :] * valid_idxs_stride_N,
+                branch_cols,
+                mask=store_mask,
+            )
+        else:
+            logits = tl.zeros([BLOCK_B, BLOCK_BRANCHES], dtype=tl.float32)
+    else:
+        branch_cols = tl.full([BLOCK_B, BLOCK_BRANCHES], -1, dtype=tl.int64)
+        branch_valid = branch_cols >= 0  # all False
+        logits = tl.zeros([BLOCK_B, BLOCK_BRANCHES], dtype=tl.float32)
+        any_valid = n_in_range > 0  # False
 
-    return pid_BR, offs_B, offs_BR, b_mask, branch_cols, branch_valid, logits
+    return pid_BR, offs_B, offs_BR, b_mask, branch_cols, branch_valid, logits, any_valid
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -325,7 +335,7 @@ def _ell_fused_sampling_kernel(
     max_branches,
     HAS_BIAS: tl.constexpr,
 ):
-    pid_BR, offs_B, offs_BR, b_mask, branch_cols, branch_valid, logits = _ell_fused_prologue(
+    pid_BR, offs_B, offs_BR, b_mask, branch_cols, branch_valid, logits, any_valid = _ell_fused_prologue(
         cur_node_ptr, ell_n_children_ptr,
         a_ptr, b_ptr, bias_ptr, ell_cols_vals_ptr,
         next_node_ptr, valid_idxs_ptr,
@@ -335,6 +345,8 @@ def _ell_fused_sampling_kernel(
         valid_idxs_stride_B, valid_idxs_stride_N,
         max_branches, B, K, BLOCK_B, BLOCK_K, BLOCK_BRANCHES, HAS_BIAS,
     )
+    if any_valid == 0:
+        return
 
     temperature = tl.load(temperature_ptr)
     u = tl.rand(seed=rng_seed, offset=offs_B[:, None] * max_branches + offs_BR[None, :])
@@ -467,7 +479,7 @@ def _ell_fused_compact_kernel(
     max_branches,
     HAS_BIAS: tl.constexpr,
 ):
-    _, offs_B, offs_BR, b_mask, _, branch_valid, logits = _ell_fused_prologue(
+    _, offs_B, offs_BR, b_mask, _, branch_valid, logits, any_valid = _ell_fused_prologue(
         cur_node_ptr, ell_n_children_ptr,
         a_ptr, b_ptr, bias_ptr, ell_cols_vals_ptr,
         next_node_ptr, valid_idxs_ptr,
@@ -477,6 +489,8 @@ def _ell_fused_compact_kernel(
         valid_idxs_stride_B, valid_idxs_stride_N,
         max_branches, B, K, BLOCK_B, BLOCK_K, BLOCK_BRANCHES, HAS_BIAS,
     )
+    if any_valid == 0:
+        return
 
     store_mask = b_mask[:, None] & (offs_BR[None, :] < max_branches)
     tl.store(
