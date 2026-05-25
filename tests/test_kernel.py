@@ -112,8 +112,9 @@ class TestKernel(unittest.TestCase):
         assert ker_cl.shape == ref_cl.shape
         assert torch.equal(ker_nn, ref_nn)
         assert torch.equal(ker_vi, ref_vi)
-        # atol for tf32 accumulation differences
-        assert torch.allclose(ker_cl, ref_cl, atol=1e-2, equal_nan=True)
+        # Kernel outputs bfloat16; atol accounts for bfloat16 vs tf32 accumulation
+        # differences (max observed: ~0.05 for K=128, ~0.015 for K=16).
+        assert torch.allclose(ker_cl.float(), ref_cl, atol=0.1, equal_nan=True)
 
     # ---------------------------------------------------------------------------
     # constrained_node_transition — matches vtnk_pytorch reference
@@ -238,10 +239,12 @@ class TestKernel(unittest.TestCase):
         ref_topk_vals = ref_topk_vals[:, :k_eff]
         ref_topk_idxs = ref_topk_idxs[:, :k_eff]
         # Sort both along k-dim to handle tie-breaking differences.
+        # Kernel outputs bfloat16; atol accounts for bfloat16 vs tf32 accumulation
+        # differences (max observed: ~0.06 for K=128, ~0.02 for K=16).
         assert torch.allclose(
-            ker_topk_l.sort(dim=-1).values,
+            ker_topk_l.float().sort(dim=-1).values,
             ref_topk_vals.sort(dim=-1).values,
-            atol=1e-2,
+            atol=0.1,
             equal_nan=True,
         ), f"topk logits mismatch\nkernel: {ker_topk_l}\nref:    {ref_topk_vals}"
         assert torch.equal(

@@ -185,6 +185,11 @@ def autoregressive_generate(
 
     ctx = enforcer.apply(model) if enforcer is not None else contextlib.nullcontext()
     with ctx:
+        constrained_linear = (
+            next((m for m in model.modules() if isinstance(m, SparseLinear)), None)
+            if isinstance(model, nn.Module)
+            else None
+        )
         state = ConstrainedGenerationState(
             generation_config=generation_config,
             generation_state=None,
@@ -196,6 +201,7 @@ def autoregressive_generate(
                 constrained_generation_state=state,
                 model_fwd=model,
                 input_ids=input_ids,
+                constrained_linear=constrained_linear,
                 attention_mask=attention_mask,
             )
             gen = state.generation_state.generated_ids  # (B, k, step+1)
@@ -251,6 +257,7 @@ def decode_one_step(
     constrained_generation_state: ConstrainedGenerationState,
     model_fwd: nn.Module,
     input_ids: torch.Tensor,
+    constrained_linear: Optional[SparseLinear] = None,
     attention_mask: Optional[torch.Tensor] = None,
 ) -> ConstrainedGenerationState:
     assert input_ids.ndim == 2  # (B, seq_len) on step 0, (B*k, 1) on subsequent steps
@@ -270,12 +277,6 @@ def decode_one_step(
         log_probas = generation_state.log_probas
         # Accumulated mask from prior steps: (B*k, prompt_len + steps_done)
         attention_mask = generation_state.attention_mask
-
-    constrained_linear = (
-        next((m for m in model_fwd.modules() if isinstance(m, SparseLinear)), None)
-        if isinstance(model_fwd, nn.Module)
-        else None
-    )
 
     use_constrained = constrained_linear is not None and step >= len(
         trie.dense_mask_by_layer
@@ -305,9 +306,19 @@ def decode_one_step(
     current_batch_size = logits.shape[0]
     B = current_batch_size if is_first_step else current_batch_size // k
 
-    # Flatten (B, k, t) -> (B*k, t) for internal indexing; first step has no prior ids
+    # Flatten (B, k, t) -> (B*k, t) for internal indexing.
+    # First step is treated as k_eff=1 with zero log-probas and empty history,
+    # so the beam selection logic below is identical for both cases.
+    k_eff = 1 if is_first_step else k
     prev_generated_ids_flat = (
-        None if is_first_step else generation_state.generated_ids.reshape(B * k, -1)
+        torch.empty(B * k_eff, 0, dtype=torch.long, device=input_ids.device)
+        if is_first_step
+        else generation_state.generated_ids.reshape(B * k, -1)
+    )
+    prev_log_probas = (
+        torch.zeros(B * k_eff, device=input_ids.device)
+        if is_first_step
+        else log_probas
     )
 
     next_node = next_nodes = valid_idxs = None
@@ -316,7 +327,6 @@ def decode_one_step(
         if is_first_step:
             layer_mask = layer_mask.unsqueeze(0).expand(current_batch_size, -1)
         else:
-            assert prev_generated_ids_flat is not None
             layer_mask = layer_mask[prev_generated_ids_flat.unbind(-1)]
         logits[~layer_mask] = float("-inf")
     else:
@@ -335,48 +345,25 @@ def decode_one_step(
         logits, beam_size, config.temperature, constrained_linear, use_constrained
     )
 
-    if is_first_step:
-        # Pick top-k candidates per batch item from beam_size samples
-        top_k_log_probas, top_k_indices = sampled_log_probas.topk(k, dim=1)  # (B, k)
-        top_k_samples = torch.gather(samples_batched, 1, top_k_indices)  # (B, k)
+    # Accumulate log-probas and pick top-k across all k_eff*n_cands candidates.
+    # n_cands may be < beam_size when the trie has fewer valid branches than beam_size.
+    # On the first step k_eff=1, so this reduces to selecting top-k from n_cands samples.
+    n_cands = sampled_log_probas.shape[1]
+    total_log_probas = prev_log_probas.reshape(B, k_eff).repeat_interleave(
+        n_cands, dim=1
+    ) + sampled_log_probas.reshape(B, k_eff * n_cands)
+    all_samples = samples_batched.reshape(B, k_eff * n_cands)
 
-        generated_ids = top_k_samples.reshape(B * k, 1)
-        new_log_probas = top_k_log_probas.reshape(B * k)
+    top_k_log_probas, top_k_indices = total_log_probas.topk(k, dim=1)  # (B, k)
+    parent_beam_ids = top_k_indices // n_cands  # (B, k), values in [0, k_eff)
+    flat_parent_ids = (
+        torch.arange(B, device=input_ids.device).unsqueeze(1) * k_eff + parent_beam_ids
+    ).reshape(B * k)
 
-        # Each of the B originals produces k children: parent[b*k + i] = b
-        flat_parent_ids = torch.arange(B, device=input_ids.device).repeat_interleave(k)
-        new_past_kv = _reindex_past_key_values(new_past_kv, flat_parent_ids)
-    else:
-        assert log_probas is not None
-        # Accumulate log-probas across beams: (B, k*beam_size)
-        prev_log_probas_expanded = log_probas.reshape(B, k).repeat_interleave(
-            beam_size, dim=1
-        )
-        total_log_probas = prev_log_probas_expanded + sampled_log_probas.reshape(
-            B, k * beam_size
-        )
-        all_samples = samples_batched.reshape(B, k * beam_size)
-
-        # Pick top-k per batch item
-        top_k_log_probas, top_k_indices = total_log_probas.topk(k, dim=1)  # (B, k)
-
-        # Identify parent beams and reorder generated_ids / past_key_values accordingly
-        parent_beam_ids = (
-            top_k_indices // beam_size
-        )  # (B, k) — which beam [0,k) within each B
-        flat_parent_ids = (
-            torch.arange(B, device=input_ids.device).unsqueeze(1) * k + parent_beam_ids
-        ).reshape(B * k)  # indices into [0, B*k)
-
-        assert prev_generated_ids_flat is not None
-        parent_generated_ids = prev_generated_ids_flat[flat_parent_ids]  # (B*k, step)
-        top_k_samples = torch.gather(all_samples, 1, top_k_indices).reshape(B * k, 1)
-        generated_ids = torch.cat([parent_generated_ids, top_k_samples], dim=-1)
-
-        new_log_probas = top_k_log_probas.reshape(B * k)
-
-        # Reorder past_key_values to match selected parent beams
-        new_past_kv = _reindex_past_key_values(new_past_kv, flat_parent_ids)
+    top_k_samples = torch.gather(all_samples, 1, top_k_indices).reshape(B * k, 1)
+    generated_ids = torch.cat([prev_generated_ids_flat[flat_parent_ids], top_k_samples], dim=-1)
+    new_log_probas = top_k_log_probas.reshape(B * k)
+    new_past_kv = _reindex_past_key_values(new_past_kv, flat_parent_ids)
 
     # Build the accumulated attention mask for the next step.
     # flat_parent_ids (shape B*k) reindexes either the prompt (B rows → B*k rows on

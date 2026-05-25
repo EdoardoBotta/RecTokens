@@ -401,7 +401,7 @@ def _fused_linear_constrained_node_transition_op(
     bias_val = bias_val.contiguous()
 
     corrected_logits = torch.full(
-        (B, N), float("-inf"), dtype=torch.bfloat16, device=a.device
+        (B, N), float("-inf"), dtype=torch.float32, device=a.device
     )
     next_node = cur_node.new_full((B, max_branches), -1)
     valid_idxs = cur_node.new_full((B, max_branches), -1)
@@ -497,7 +497,7 @@ def _fused_sparse_linear_constrained_node_transition_kernel(
             corrected_logits_ptr
             + offs_B * corrected_logits_stride_B
             + col_k * corrected_logits_stride_N,
-            logit_k.to(tl.bfloat16),
+            logit_k,
             mask=c_mask,
         )
 
@@ -648,8 +648,10 @@ def _fused_sparse_linear_constrained_node_transition_sampling_kernel(
     block_max_gumbel = tl.max(g_vals, axis=1)  # [BLOCK_B]
 
     # Recover winning token: exactly one winner per batch element (gumbel ties are negligible).
-    is_winner = (g_vals == block_max_gumbel[:, None]) & branch_valid
-    block_sample = tl.sum(tl.where(is_winner, branch_cols.to(tl.float32), 0.0), axis=1)
+    winner_idx = tl.argmax(g_vals, axis=1)  # [BLOCK_B]
+    br_sel = tl.arange(0, BLOCK_BRANCHES)[None, :] == winner_idx[:, None]
+    block_sample = tl.sum(tl.where(br_sel & branch_valid, branch_cols.to(tl.float32), 0.0), axis=1)
+
 
     # One write per (batch, branch-block) — unique addresses, no lock needed.
     # Skip block_sample write when no valid branch exists; buf retains its -1.0 init value.
@@ -693,7 +695,7 @@ def _fused_linear_constrained_node_transition_topk_op(
     valid_idxs = cur_node.new_full((B, max_branches), -1)
     # Pass 1: compute per-branch logits into a [B, max_branches] scratch buffer.
     branch_logits = torch.full(
-        (B, max_branches), float("-inf"), dtype=torch.bfloat16, device=a.device
+        (B, max_branches), float("-inf"), dtype=torch.float32, device=a.device
     )
 
     grid = lambda meta: (
@@ -781,6 +783,6 @@ def _fused_sparse_linear_constrained_node_transition_compact_kernel(
     store_mask = b_mask[:, None] & (offs_BR[None, :] < max_branches)
     tl.store(
         branch_logits_ptr + offs_B[:, None] * max_branches + offs_BR[None, :],
-        tl.where(branch_valid, logits, float("-inf")).to(tl.bfloat16),
+        tl.where(branch_valid, logits, float("-inf")),
         mask=store_mask,
     )
