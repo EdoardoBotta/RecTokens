@@ -21,11 +21,16 @@ import seaborn as sns
 import pandas as pd
 
 from rectokens.schemas.compact_csr_trie import CompactCSRTrie
+from rectokens.schemas.compact_ell_trie import CompactELLTrie
 from rectokens.schemas.state import ConstraintState
 from rectokens.decoding.vntk import sparse_linear_pytorch, sparse_linear_compact_pytorch
 from rectokens.ops.constrained_node_transition import (
     fused_linear_constrained_node_transition_sampling,
     fused_linear_constrained_node_transition_topk,
+)
+from rectokens.kernels.constrained_node_transition_ell import (
+    _ell_fused_linear_constrained_node_transition_sampling_op as ell_sampling_op,
+    _ell_fused_linear_constrained_node_transition_topk_op as ell_topk_op,
 )
 
 DEVICE = torch.device("cuda")
@@ -36,13 +41,16 @@ REP = 100
 
 ALL_ALGORITHMS = [
     "fused_sample",
+    "ell_sample",
     "sparse_pytorch_sample",
     "fused_topk",
+    "ell_topk",
     "sparse_pytorch_topk",
     "sparse_pytorch_topk_compact",
 ]
 DEFAULT_ALGORITHMS = [
     "fused_sample",
+    "ell_sample",
     "sparse_pytorch_sample",
 ]
 DEFAULT_SPARSITY = 0.01
@@ -90,6 +98,11 @@ def make_csr_diverse(
     return csr, cur_node
 
 
+def make_ell(csr: CompactCSRTrie) -> CompactELLTrie:
+    """Convert a device-resident CSR trie to ELL format (stays on the same device)."""
+    return CompactELLTrie.from_csr(csr)
+
+
 def run_bench(fn):
     return testing.do_bench(fn, warmup=WARMUP, rep=REP)
 
@@ -118,6 +131,11 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
             weight = torch.randn(N, K, device=DEVICE, dtype=torch.bfloat16)
 
             cs = ConstraintState(step=step, trie=csr, cur_node=cur_node)
+
+            needs_ell = alg_set & {"ell_sample", "ell_topk"}
+            if needs_ell:
+                ell = make_ell(csr)
+                _bias = a.new_empty(0)
 
             needs_sparse_full = alg_set & {"sparse_pytorch_sample", "sparse_pytorch_topk"}
             needs_sparse_compact = "sparse_pytorch_topk_compact" in alg_set
@@ -163,10 +181,14 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
             with torch.no_grad():
                 if "fused_sample" in alg_set:
                     fused_linear_constrained_node_transition_sampling(a, weight.T, cs)
+                if "ell_sample" in alg_set:
+                    ell_sampling_op(a, weight.T, _bias, cur_node, ell.ell_cols_vals, ell.n_children, max_branches, False)
                 if "sparse_pytorch_sample" in alg_set:
                     sparse_pytorch_with_sample()
                 if "fused_topk" in alg_set:
                     fused_linear_constrained_node_transition_topk(a, weight.T, cs, k=k)
+                if "ell_topk" in alg_set:
+                    ell_topk_op(a, weight.T, _bias, cur_node, ell.ell_cols_vals, ell.n_children, max_branches, False, k)
                 if "sparse_pytorch_topk" in alg_set:
                     sparse_pytorch_with_topk()
                 if "sparse_pytorch_topk_compact" in alg_set:
@@ -181,6 +203,13 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                             a, weight.T, cs
                         )
                     )
+                if "ell_sample" in alg_set:
+                    record["ms_ell_sample"] = run_bench(
+                        lambda: ell_sampling_op(
+                            a, weight.T, _bias, cur_node,
+                            ell.ell_cols_vals, ell.n_children, max_branches, False,
+                        )
+                    )
                 if "sparse_pytorch_sample" in alg_set:
                     record["ms_sparse_pytorch_sample"] = run_bench(
                         sparse_pytorch_with_sample
@@ -189,6 +218,13 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                     record["ms_fused_topk"] = run_bench(
                         lambda: fused_linear_constrained_node_transition_topk(
                             a, weight.T, cs, k=k
+                        )
+                    )
+                if "ell_topk" in alg_set:
+                    record["ms_ell_topk"] = run_bench(
+                        lambda: ell_topk_op(
+                            a, weight.T, _bias, cur_node,
+                            ell.ell_cols_vals, ell.n_children, max_branches, False, k,
                         )
                     )
                 if "sparse_pytorch_topk" in alg_set:
@@ -203,9 +239,25 @@ def benchmark_grid(B_vals, N_vals, algorithms, sparsity, k_top, diverse_nodes=Fa
                 record["speedup_fused_vs_sparse_pytorch_sample"] = (
                     record["ms_sparse_pytorch_sample"] / record["ms_fused_sample"]
                 )
+            if "ell_sample" in alg_set and "fused_sample" in alg_set:
+                record["speedup_ell_vs_csr_sample"] = (
+                    record["ms_fused_sample"] / record["ms_ell_sample"]
+                )
+            if "ell_sample" in alg_set and "sparse_pytorch_sample" in alg_set:
+                record["speedup_ell_vs_sparse_pytorch_sample"] = (
+                    record["ms_sparse_pytorch_sample"] / record["ms_ell_sample"]
+                )
             if "fused_topk" in alg_set and "sparse_pytorch_topk" in alg_set:
                 record["speedup_fused_topk_vs_sparse_pytorch_topk"] = (
                     record["ms_sparse_pytorch_topk"] / record["ms_fused_topk"]
+                )
+            if "ell_topk" in alg_set and "fused_topk" in alg_set:
+                record["speedup_ell_vs_csr_topk"] = (
+                    record["ms_fused_topk"] / record["ms_ell_topk"]
+                )
+            if "ell_topk" in alg_set and "sparse_pytorch_topk" in alg_set:
+                record["speedup_ell_vs_sparse_pytorch_topk"] = (
+                    record["ms_sparse_pytorch_topk"] / record["ms_ell_topk"]
                 )
             if "fused_topk" in alg_set and "sparse_pytorch_topk_compact" in alg_set:
                 record["speedup_fused_topk_vs_sparse_pytorch_topk_compact"] = (
@@ -301,6 +353,38 @@ if __name__ == "__main__":
 
     print(df.to_string(index=False))
 
+    if "speedup_ell_vs_csr_sample" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_ell_vs_csr_sample",
+            title=f"ELL sample speedup vs CSR sample  (K={K})",
+            filename="out/heatmap_ell_vs_csr_sample.jpg",
+            cbar_label="Speedup (>1 = ELL faster)",
+        )
+    if "speedup_ell_vs_sparse_pytorch_sample" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_ell_vs_sparse_pytorch_sample",
+            title=f"ELL sample speedup vs compile(sparse_linear_pytorch)+multinomial  (K={K})",
+            filename="out/heatmap_ell_sample_vs_sparse_pytorch.jpg",
+            cbar_label="Speedup (>1 = ELL faster)",
+        )
+    if "speedup_ell_vs_csr_topk" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_ell_vs_csr_topk",
+            title=f"ELL top-k speedup vs CSR top-k  (K={K}, k={args.topk})",
+            filename="out/heatmap_ell_vs_csr_topk.jpg",
+            cbar_label="Speedup (>1 = ELL faster)",
+        )
+    if "speedup_ell_vs_sparse_pytorch_topk" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_ell_vs_sparse_pytorch_topk",
+            title=f"ELL top-k speedup vs compile(sparse_linear_pytorch)+topk  (K={K}, k={args.topk})",
+            filename="out/heatmap_ell_topk_vs_sparse_pytorch.jpg",
+            cbar_label="Speedup (>1 = ELL faster)",
+        )
     if "speedup_fused_vs_sparse_pytorch_sample" in df.columns:
         plot_heatmap(
             df,
