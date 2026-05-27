@@ -132,7 +132,7 @@ def _ell_fused_prologue(
     next_node_stride_N,
     valid_idxs_stride_B,
     valid_idxs_stride_N,
-    max_branches,
+    max_branches: tl.constexpr,
     B: tl.constexpr,
     K: tl.constexpr,
     BLOCK_B: tl.constexpr,
@@ -332,7 +332,7 @@ def _ell_fused_sampling_kernel(
     BLOCK_B: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_BRANCHES: tl.constexpr,
-    max_branches,
+    max_branches: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
     pid_BR, offs_B, offs_BR, b_mask, branch_cols, branch_valid, logits, any_valid = _ell_fused_prologue(
@@ -476,7 +476,7 @@ def _ell_fused_compact_kernel(
     BLOCK_B: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_BRANCHES: tl.constexpr,
-    max_branches,
+    max_branches: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
     _, offs_B, offs_BR, b_mask, _, branch_valid, logits, any_valid = _ell_fused_prologue(
