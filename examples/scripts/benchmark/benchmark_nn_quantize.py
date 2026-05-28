@@ -5,12 +5,14 @@ Benchmark: nearest-neighbor quantization kernels
     cdist_compiled – torch.compile(torch.cdist + argmin)
     faiss_search   – FAISS-GPU flat L2, index pre-built (static codebook)
 
-Grid: B (batch size) × D (embedding dim). N (codebook size) fixed per run.
+Grid: B (batch size) × D (embedding dim). N (codebook size) fixed per run group.
 Heatmap axes: B (batch size) vs D (embedding dim).
 """
 
 import argparse
 import os
+from typing import Any, cast
+
 import torch
 import triton.testing as testing
 import matplotlib.pyplot as plt
@@ -19,12 +21,9 @@ import pandas as pd
 
 from rectokens.kernels.nn_quantize import quantize_fwd, quantize_fwd_mm
 from rectokens.ops.faiss_quantize import make_gpu_index
+from benchmark_config import QUANTIZE_SUITE, QuantizeBenchmarkSuite, QuantizeRunConfig
 
 DEVICE = torch.device("cuda")
-N = 256
-WARMUP = 25
-FAISS_WARMUP = 100
-REP = 100
 
 ALL_ALGORITHMS = ["quantize_fwd", "quantize_fwd_mm", "cdist_compiled", "faiss_search"]
 
@@ -36,80 +35,112 @@ def cdist_nn(x: torch.Tensor, codebook: torch.Tensor) -> torch.Tensor:
 cdist_nn_compiled = torch.compile(cdist_nn)
 
 
-def run_bench(fn, warmup=WARMUP):
-    return testing.do_bench(fn, warmup=warmup, rep=REP)
+def run_bench(fn, suite: QuantizeBenchmarkSuite, faiss: bool = False) -> float:
+    warmup = suite.faiss_warmup if faiss else suite.warmup
+    return cast(float, testing.do_bench(fn, warmup=warmup, rep=suite.rep))
 
 
-def benchmark_grid(B_vals, D_vals, algorithms):
+def benchmark_run(run: QuantizeRunConfig, suite: QuantizeBenchmarkSuite, algorithms: list[str]) -> dict[str, Any]:
     alg_set = set(algorithms)
-    records = []
+    print(f"  B={run.B:6d}  D={run.D:6d}  N={run.N}")
 
-    for B in B_vals:
-        for D in D_vals:
-            print(f"  B={B:6d}  D={D:6d}")
+    x = torch.randn(run.B, run.D, device=DEVICE)
+    codebook = torch.randn(run.N, run.D, device=DEVICE)
 
-            x = torch.randn(B, D, device=DEVICE)
-            codebook = torch.randn(N, D, device=DEVICE)
+    if "faiss_search" in alg_set:
+        gpu_index = make_gpu_index(codebook)
 
-            if "faiss_search" in alg_set:
-                gpu_index = make_gpu_index(codebook)
+    with torch.no_grad():
+        if "quantize_fwd" in alg_set:
+            quantize_fwd(x, codebook)
+        if "quantize_fwd_mm" in alg_set:
+            quantize_fwd_mm(x, codebook)
+        if "cdist_compiled" in alg_set:
+            cdist_nn_compiled(x, codebook)
+        if "faiss_search" in alg_set:
+            gpu_index.search(x.contiguous(), 1)
 
-            # warmup / force compilation / autotuning
-            with torch.no_grad():
-                if "quantize_fwd" in alg_set:
-                    quantize_fwd(x, codebook)
-                if "quantize_fwd_mm" in alg_set:
-                    quantize_fwd_mm(x, codebook)
-                if "cdist_compiled" in alg_set:
-                    cdist_nn_compiled(x, codebook)
-                if "faiss_search" in alg_set:
-                    gpu_index.search(x.contiguous(), 1)
+    record: dict[str, Any] = {"B": run.B, "D": run.D, "N": run.N, "BN": run.B * run.N}
 
-            record = {"B": B, "D": D, "BN": B * N}
+    with torch.no_grad():
+        if "quantize_fwd" in alg_set:
+            record["ms_quantize_fwd"] = run_bench(lambda: quantize_fwd(x, codebook), suite)
+        if "quantize_fwd_mm" in alg_set:
+            record["ms_quantize_fwd_mm"] = run_bench(lambda: quantize_fwd_mm(x, codebook), suite)
+        if "cdist_compiled" in alg_set:
+            record["ms_cdist_compiled"] = run_bench(lambda: cdist_nn_compiled(x, codebook), suite)
+        if "faiss_search" in alg_set:
+            record["ms_faiss_search"] = run_bench(
+                lambda: gpu_index.search(x.contiguous(), 1), suite, faiss=True
+            )
 
-            with torch.no_grad():
-                if "quantize_fwd" in alg_set:
-                    record["ms_quantize_fwd"] = run_bench(
-                        lambda: quantize_fwd(x, codebook)
-                    )
-                if "quantize_fwd_mm" in alg_set:
-                    record["ms_quantize_fwd_mm"] = run_bench(
-                        lambda: quantize_fwd_mm(x, codebook)
-                    )
-                if "cdist_compiled" in alg_set:
-                    record["ms_cdist_compiled"] = run_bench(
-                        lambda: cdist_nn_compiled(x, codebook)
-                    )
-                if "faiss_search" in alg_set:
-                    record["ms_faiss_search"] = run_bench(
-                        lambda: gpu_index.search(x.contiguous(), 1),
-                        warmup=FAISS_WARMUP,
-                    )
+    if "quantize_fwd" in alg_set and "quantize_fwd_mm" in alg_set:
+        record["speedup_fwd_vs_mm"] = record["ms_quantize_fwd_mm"] / record["ms_quantize_fwd"]
+    if "quantize_fwd" in alg_set and "cdist_compiled" in alg_set:
+        record["speedup_fwd_vs_cdist"] = record["ms_cdist_compiled"] / record["ms_quantize_fwd"]
+    if "quantize_fwd_mm" in alg_set and "cdist_compiled" in alg_set:
+        record["speedup_mm_vs_cdist"] = record["ms_cdist_compiled"] / record["ms_quantize_fwd_mm"]
+    if "quantize_fwd" in alg_set and "faiss_search" in alg_set:
+        record["speedup_fwd_vs_faiss"] = record["ms_faiss_search"] / record["ms_quantize_fwd"]
+    if "quantize_fwd_mm" in alg_set and "faiss_search" in alg_set:
+        record["speedup_mm_vs_faiss"] = record["ms_faiss_search"] / record["ms_quantize_fwd_mm"]
 
-            if "quantize_fwd" in alg_set and "quantize_fwd_mm" in alg_set:
-                record["speedup_fwd_vs_mm"] = (
-                    record["ms_quantize_fwd_mm"] / record["ms_quantize_fwd"]
-                )
-            if "quantize_fwd" in alg_set and "cdist_compiled" in alg_set:
-                record["speedup_fwd_vs_cdist"] = (
-                    record["ms_cdist_compiled"] / record["ms_quantize_fwd"]
-                )
-            if "quantize_fwd_mm" in alg_set and "cdist_compiled" in alg_set:
-                record["speedup_mm_vs_cdist"] = (
-                    record["ms_cdist_compiled"] / record["ms_quantize_fwd_mm"]
-                )
-            if "quantize_fwd" in alg_set and "faiss_search" in alg_set:
-                record["speedup_fwd_vs_faiss"] = (
-                    record["ms_faiss_search"] / record["ms_quantize_fwd"]
-                )
-            if "quantize_fwd_mm" in alg_set and "faiss_search" in alg_set:
-                record["speedup_mm_vs_faiss"] = (
-                    record["ms_faiss_search"] / record["ms_quantize_fwd_mm"]
-                )
+    return record
 
-            records.append(record)
 
-    return pd.DataFrame(records)
+def benchmark_for_n(n: int, suite: QuantizeBenchmarkSuite, algorithms: list[str]) -> None:
+    runs = [r for r in suite.runs if r.N == n]
+
+    print(f"\n{'=' * 50}")
+    print(f"Benchmarking N={n} (codebook size fixed)")
+    print(f"Algorithms: {algorithms}\n")
+
+    df = pd.DataFrame([benchmark_run(run, suite, algorithms) for run in runs])
+    csv_path = f"out/bench_nn_quantize_N{n}.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"\nSaved {csv_path}\n")
+    print(df.to_string(index=False))
+
+    if "speedup_fwd_vs_mm" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_fwd_vs_mm",
+            title=f"quantize_fwd speedup vs quantize_fwd_mm  (N={n})",
+            filename=f"out/heatmap_fwd_vs_mm_N{n}.jpg",
+            cbar_label="Speedup (>1 = fwd faster)",
+        )
+    if "speedup_fwd_vs_cdist" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_fwd_vs_cdist",
+            title=f"quantize_fwd speedup vs cdist_compiled  (N={n})",
+            filename=f"out/heatmap_fwd_vs_cdist_N{n}.jpg",
+            cbar_label="Speedup (>1 = fwd faster)",
+        )
+    if "speedup_mm_vs_cdist" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_mm_vs_cdist",
+            title=f"quantize_fwd_mm speedup vs cdist_compiled  (N={n})",
+            filename=f"out/heatmap_mm_vs_cdist_N{n}.jpg",
+            cbar_label="Speedup (>1 = mm faster)",
+        )
+    if "speedup_fwd_vs_faiss" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_fwd_vs_faiss",
+            title=f"quantize_fwd speedup vs faiss_search  (N={n})",
+            filename=f"out/heatmap_fwd_vs_faiss_N{n}.jpg",
+            cbar_label="Speedup (>1 = fwd faster)",
+        )
+    if "speedup_mm_vs_faiss" in df.columns:
+        plot_heatmap(
+            df,
+            value_col="speedup_mm_vs_faiss",
+            title=f"quantize_fwd_mm speedup vs faiss_search  (N={n})",
+            filename=f"out/heatmap_mm_vs_faiss_N{n}.jpg",
+            cbar_label="Speedup (>1 = mm faster)",
+        )
 
 
 def plot_heatmap(df, value_col, title, filename, fmt=".2f", cbar_label="Speedup"):
@@ -132,65 +163,6 @@ def plot_heatmap(df, value_col, title, filename, fmt=".2f", cbar_label="Speedup"
     print(f"  Saved {filename}")
 
 
-def run_for_N(n_val, B_vals, D_vals, algorithms):
-    global N
-    N = n_val
-
-    print(f"\n{'=' * 50}")
-    print(f"Benchmarking N={N} (fixed)")
-    print(f"Algorithms: {algorithms}")
-    print(f"B_vals={B_vals}")
-    print(f"D_vals={D_vals}\n")
-
-    df = benchmark_grid(B_vals, D_vals, algorithms=algorithms)
-    csv_path = f"out/bench_nn_quantize_N{N}.csv"
-    df.to_csv(csv_path, index=False)
-    print(f"\nSaved {csv_path}\n")
-
-    print(df.to_string(index=False))
-
-    if "speedup_fwd_vs_mm" in df.columns:
-        plot_heatmap(
-            df,
-            value_col="speedup_fwd_vs_mm",
-            title=f"quantize_fwd speedup vs quantize_fwd_mm  (N={N})",
-            filename=f"out/heatmap_fwd_vs_mm_N{N}.jpg",
-            cbar_label="Speedup (>1 = fwd faster)",
-        )
-    if "speedup_fwd_vs_cdist" in df.columns:
-        plot_heatmap(
-            df,
-            value_col="speedup_fwd_vs_cdist",
-            title=f"quantize_fwd speedup vs cdist_compiled  (N={N})",
-            filename=f"out/heatmap_fwd_vs_cdist_N{N}.jpg",
-            cbar_label="Speedup (>1 = fwd faster)",
-        )
-    if "speedup_mm_vs_cdist" in df.columns:
-        plot_heatmap(
-            df,
-            value_col="speedup_mm_vs_cdist",
-            title=f"quantize_fwd_mm speedup vs cdist_compiled  (N={N})",
-            filename=f"out/heatmap_mm_vs_cdist_N{N}.jpg",
-            cbar_label="Speedup (>1 = mm faster)",
-        )
-    if "speedup_fwd_vs_faiss" in df.columns:
-        plot_heatmap(
-            df,
-            value_col="speedup_fwd_vs_faiss",
-            title=f"quantize_fwd speedup vs faiss_search  (N={N})",
-            filename=f"out/heatmap_fwd_vs_faiss_N{N}.jpg",
-            cbar_label="Speedup (>1 = fwd faster)",
-        )
-    if "speedup_mm_vs_faiss" in df.columns:
-        plot_heatmap(
-            df,
-            value_col="speedup_mm_vs_faiss",
-            title=f"quantize_fwd_mm speedup vs faiss_search  (N={N})",
-            filename=f"out/heatmap_mm_vs_faiss_N{N}.jpg",
-            cbar_label="Speedup (>1 = mm faster)",
-        )
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Benchmark nearest-neighbor quantization algorithms."
@@ -208,8 +180,7 @@ if __name__ == "__main__":
     assert torch.cuda.is_available(), "CUDA required"
     os.makedirs("out", exist_ok=True)
 
-    B_vals = [32, 256, 1024, 4096, 16384, 32768, 65536]
-    D_vals = [64, 128, 256]
-
-    for n_val in [64, 128, 256, 512]:
-        run_for_N(n_val, B_vals, D_vals, algorithms=args.algorithms)
+    suite = QUANTIZE_SUITE
+    n_vals = sorted({r.N for r in suite.runs})
+    for n in n_vals:
+        benchmark_for_n(n, suite, algorithms=args.algorithms)
