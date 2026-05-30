@@ -53,7 +53,7 @@ class SparseLinear(nn.Module):
         if self._ctx is None:
             return self.base_linear(x)
 
-        w, bias = self.base_linear.weight, self.base_linear.bias
+        w, bias = self.base_linear.weight.T, self.base_linear.bias
 
         if self._strategy == "sample":
             next_nodes, valid_idxs, sample = (
@@ -72,7 +72,7 @@ class SparseLinear(nn.Module):
                 sample,
             )
             # Return zeros — decode_one_step uses self.sample directly.
-            return x.new_zeros(x.shape[0], w.shape[0])
+            return x.new_zeros(x.shape[0], w.shape[1])
 
         if self._strategy == "topk":
             next_nodes, valid_idxs, topk_logits, topk_idxs = (

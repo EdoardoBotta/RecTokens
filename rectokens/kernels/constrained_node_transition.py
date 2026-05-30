@@ -177,13 +177,15 @@ def _constrained_node_transition_kernel(
 
 
 _FUSED_AUTOTUNE_CONFIGS = [
-    triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
-    triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
-    triton.Config({"BLOCK_B": 256, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}),
-    triton.Config({"BLOCK_B": 64, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}),
-    triton.Config({"BLOCK_B": 128, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}),
-    triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
-    triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}),
+    triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}, num_stages=2),
+    triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}, num_stages=3),
+    triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}, num_stages=2),
+    triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}, num_stages=3),
+    triton.Config({"BLOCK_B": 256, "BLOCK_K": 64, "BLOCK_BRANCHES": 4}, num_stages=2),
+    triton.Config({"BLOCK_B": 64, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}, num_stages=2),
+    triton.Config({"BLOCK_B": 128, "BLOCK_K": 128, "BLOCK_BRANCHES": 8}, num_stages=2),
+    triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}, num_stages=2),
+    triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 16}, num_stages=2),
     # triton.Config({"BLOCK_B": 64, "BLOCK_K": 64, "BLOCK_BRANCHES": 64}),
     # triton.Config({"BLOCK_B": 128, "BLOCK_K": 64, "BLOCK_BRANCHES": 64}),
 ]
@@ -252,8 +254,11 @@ def _compute_branch_logits(
 ):
     """Load all branch data and compute per-branch dot-product logits.
 
-    Loads a_chunk once per K-tile and amortizes it across all BLOCK_BRANCHES branches,
-    reducing query-vector HBM traffic by BLOCK_BRANCHES× vs computing each branch separately.
+    Loads a_chunk once per K-tile (amortized across BLOCK_BRANCHES branches).
+    Within each K-tile, b_chunk loads are software-pipelined: the load for branch
+    i+1 is issued before the dot-product computation for branch i, overlapping
+    HBM gather latency with compute. num_stages on the outer k_tile loop drives
+    a_chunk prefetch via Triton's auto-pipeliner.
 
     Returns (branch_cols, branch_vals, branch_valid, logits) as [BLOCK_B, BLOCK_BRANCHES]
     tensors. Bias is folded into logits when HAS_BIAS=True.
@@ -284,22 +289,46 @@ def _compute_branch_logits(
         k_mask = offs_K < K
 
         # Load a_chunk once per tile; reused across all BLOCK_BRANCHES branches.
+        # Triton's auto-pipeliner (num_stages) overlaps this load with the
+        # previous tile's inner branch loop.
         a_chunk = tl.load(
             a_ptr + offs_B[:, None] * a_stride_B + offs_K[None, :] * a_stride_K,
             mask=b_mask[:, None] & k_mask[None, :],
             other=0.0,
         )  # [BLOCK_B, BLOCK_K]
 
+        # Software pipeline prologue: issue b_chunk load for branch 0 before
+        # entering the inner loop so it is in flight during the first dot-product.
+        _, col_k_next, c_mask_next = _select_branch(0, branch_cols, branch_valid, BLOCK_BRANCHES)
+        b_chunk_next = tl.load(
+            b_ptr + offs_K[None, :] * b_stride_K + col_k_next[:, None] * b_stride_N,
+            mask=c_mask_next[:, None] & k_mask[None, :],
+            other=0.0,
+        )
+
+        # tl.static_range fully unrolls the loop at compile time, turning each
+        # iteration into a distinct sequence of IR operations. This lets us alias
+        # b_chunk_next → b_chunk_cur and immediately rebind b_chunk_next to the
+        # *next* branch's load, creating a double-buffer: load i+1 is in flight
+        # while dot(a_chunk, b_chunk_i) executes.
         for local_br in tl.static_range(BLOCK_BRANCHES):
-            br_sel, col_k, c_mask = _select_branch(
-                local_br, branch_cols, branch_valid, BLOCK_BRANCHES
-            )
-            b_chunk = tl.load(
-                b_ptr + offs_K[None, :] * b_stride_K + col_k[:, None] * b_stride_N,
-                mask=c_mask[:, None] & k_mask[None, :],
-                other=0.0,
-            )  # [BLOCK_B, BLOCK_K]
-            dot = tl.sum(a_chunk * b_chunk, axis=1)  # [BLOCK_B]
+            b_chunk_cur = b_chunk_next  # use the prefetched data
+            br_sel = tl.arange(0, BLOCK_BRANCHES) == local_br
+
+            # Prefetch next branch's b_chunk while the current dot-product executes.
+            # The Python-level if is a compile-time guard; the last iteration emits
+            # no prefetch load, avoiding an out-of-bounds address.
+            if local_br + 1 < BLOCK_BRANCHES:
+                _, col_k_next, c_mask_next = _select_branch(
+                    local_br + 1, branch_cols, branch_valid, BLOCK_BRANCHES
+                )
+                b_chunk_next = tl.load(
+                    b_ptr + offs_K[None, :] * b_stride_K + col_k_next[:, None] * b_stride_N,
+                    mask=c_mask_next[:, None] & k_mask[None, :],
+                    other=0.0,
+                )
+
+            dot = tl.sum(a_chunk * b_chunk_cur, axis=1)  # [BLOCK_B]
             logits = tl.where(br_sel[None, :], logits + dot[:, None], logits)
 
     if HAS_BIAS:
