@@ -39,7 +39,7 @@ from rectokens.kernels.constrained_node_transition_ell import (
     _ell_fused_linear_constrained_node_transition_sampling_op as ell_sampling_op,
     _ell_fused_linear_constrained_node_transition_topk_op as ell_topk_op,
 )
-from benchmark_config import FUSED_SAMPLE_SUITE_N256, FUSED_SAMPLE_SUITE_N150K, BenchmarkSuite, RunConfig
+from benchmark_config import FUSED_SAMPLE_SUITE_N256, FUSED_SAMPLE_SUITE_N256_SPARSITY_SWEEP, FUSED_SAMPLE_SUITE_N150K, BenchmarkSuite, RunConfig
 
 DEVICE = torch.device("cuda")
 
@@ -258,7 +258,7 @@ def benchmark_run(run: RunConfig, suite: BenchmarkSuite, algorithms: list[str]) 
             _, _, bl = constrained_node_transition(_dense_matmul_compiled(a, weight), cs)
             torch.topk(bl, k, dim=-1)
 
-    record: dict[str, Any] = {"B": run.B, "N": run.N}
+    record: dict[str, Any] = {"B": run.B, "N": run.N, "sparsity": run.sparsity}
 
     # --- benchmark ---
     with torch.no_grad():
@@ -374,6 +374,47 @@ def benchmark_grid(suite: BenchmarkSuite, algorithms: list[str]) -> pd.DataFrame
     return pd.DataFrame([benchmark_run(run, suite, algorithms) for run in suite.runs])
 
 
+def plot_sparsity_sweep(df: pd.DataFrame, filename: str) -> None:
+    algo_cols = {
+        "fused_topk": "ms_fused_topk",
+        "sparse_pytorch_topk_compact": "ms_sparse_pytorch_topk_compact",
+        "fused_sample": "ms_fused_sample",
+        "sparse_pytorch_sample_compact": "ms_sparse_pytorch_sample_compact",
+        "dense_topk": "ms_dense_topk",
+    }
+    present = {label: col for label, col in algo_cols.items() if col in df.columns}
+
+    fig, (ax_ms, ax_speedup) = plt.subplots(1, 2, figsize=(14, 5))
+
+    for label, col in present.items():
+        ax_ms.plot(df["sparsity"], df[col], marker="o", label=label)
+    ax_ms.set_xlabel("Sparsity")
+    ax_ms.set_ylabel("Latency (ms)")
+    ax_ms.set_title("Latency vs Sparsity (B=256, N=256)")
+    ax_ms.legend(fontsize=8)
+    ax_ms.grid(True, alpha=0.3)
+
+    speedup_cols = {
+        "fused_topk / sparse_topk_compact": "speedup_fused_topk_vs_sparse_pytorch_topk_compact",
+        "fused_topk / dense_topk": "speedup_fused_topk_vs_dense_topk",
+        "fused_sample / sparse_sample_compact": "speedup_fused_vs_sparse_pytorch_sample_compact",
+    }
+    for label, col in speedup_cols.items():
+        if col in df.columns:
+            ax_speedup.plot(df["sparsity"], df[col], marker="o", label=label)
+    ax_speedup.axhline(1.0, color="black", linestyle="--", linewidth=0.8, label="break-even")
+    ax_speedup.set_xlabel("Sparsity")
+    ax_speedup.set_ylabel("Speedup (>1 = fused/sparse faster)")
+    ax_speedup.set_title("Speedup vs Sparsity (B=256, N=256)")
+    ax_speedup.legend(fontsize=8)
+    ax_speedup.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(filename, dpi=150, format="jpg")
+    plt.close()
+    print(f"  Saved {filename}")
+
+
 def plot_heatmap(df, value_col, title, filename, fmt=".2f", cbar_label="Speedup"):
     pivot = df.pivot(index="B", columns="N", values=value_col)
     plt.figure(figsize=(10, 6))
@@ -410,21 +451,29 @@ if __name__ == "__main__":
     assert torch.cuda.is_available(), "CUDA required"
     os.makedirs("out", exist_ok=True)
 
-    suites = [FUSED_SAMPLE_SUITE_N256, FUSED_SAMPLE_SUITE_N150K]
+    grid_suites = [FUSED_SAMPLE_SUITE_N256, FUSED_SAMPLE_SUITE_N150K]
+    sweep_suites = [FUSED_SAMPLE_SUITE_N256_SPARSITY_SWEEP]
 
     print(f"Algorithms: {args.algorithms}")
-    for suite in suites:
+    for suite in grid_suites + sweep_suites:
         print(f"  diverse_nodes={suite.diverse_nodes}")
         for run in suite.runs:
             print(f"    B={run.B}, N={run.N}, k={run.k}, k_top={run.k_top}, sparsity={run.sparsity}")
     print()
 
-    df = pd.concat([benchmark_grid(suite, algorithms=args.algorithms) for suite in suites], ignore_index=True)
+    df = pd.concat([benchmark_grid(suite, algorithms=args.algorithms) for suite in grid_suites], ignore_index=True)
     csv_path = "out/bench_fused_sample.csv"
     df.to_csv(csv_path, index=False)
     print(f"\nSaved {csv_path}\n")
-
     print(df.to_string(index=False))
+
+    df_sweep = pd.concat([benchmark_grid(suite, algorithms=args.algorithms) for suite in sweep_suites], ignore_index=True)
+    sweep_csv_path = "out/bench_fused_sample_sparsity_sweep.csv"
+    df_sweep.to_csv(sweep_csv_path, index=False)
+    print(f"\nSparsity sweep (B=256, N=256):\n")
+    print(df_sweep.to_string(index=False))
+
+    plot_sparsity_sweep(df_sweep, "out/sparsity_sweep_n256.jpg")
 
     if "speedup_ell_vs_csr_sample" in df.columns:
         plot_heatmap(

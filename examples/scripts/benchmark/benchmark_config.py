@@ -92,6 +92,13 @@ FUSED_SAMPLE_SUITE_N256 = BenchmarkSuite(
     runs=trie_runs(B_vals=[256, 1024], N_vals=[256], k=1024, k_top=50, sparsity=0.9),
 )
 
+FUSED_SAMPLE_SUITE_N256_SPARSITY_SWEEP = BenchmarkSuite(
+    runs=[
+        RunConfig(B=256, N=256, k=1024, k_top=50, sparsity=s)
+        for s in [0.05, 0.25, 0.5, 0.75, 0.9]
+    ],
+)
+
 FUSED_SAMPLE_SUITE_N150K = BenchmarkSuite(
     runs=trie_runs(B_vals=[256, 1024], N_vals=[150_000], k=1024, k_top=50, sparsity=0.01),
 )
