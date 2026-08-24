@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/1165447492.svg)](https://doi.org/10.5281/zenodo.22076189)
+
 <p align="center">
   <img src="assets/rectokens_logo_v2.svg" alt="RecTokens" width="100%"/>
 </p>
